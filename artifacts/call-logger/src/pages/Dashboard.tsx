@@ -144,11 +144,6 @@ export default function Dashboard() {
       setMigrationRan(false);
     }
 
-    // Debug log for one sample call regardless
-    const sample = loadCalls()[0];
-    if (sample) {
-      console.log("sample call for chart parsing", sample, getCallDate(sample), getDateKey(sample), getHourKey(sample));
-    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -846,63 +841,6 @@ export default function Dashboard() {
               </div>
             </Sec>
 
-            {/* Production debug strip */}
-            {hasData && (
-              <div className="border border-zinc-800/60 bg-zinc-900/40 px-3 py-2 space-y-1.5">
-                <div className="flex flex-wrap items-center gap-x-5 gap-y-1">
-                  <span className="text-[9px] font-mono text-zinc-600 uppercase tracking-widest">
-                    Timestamp valid: <span className={tsQuality.valid === tsQuality.total ? "text-green-600" : "text-amber-500"}>{tsQuality.valid}</span>
-                    {" / Total: "}<span className="text-zinc-500">{tsQuality.total}</span>
-                    {tsQuality.unknown > 0 && <span className="ml-2 text-amber-500">Invalid: {tsQuality.unknown}</span>}
-                    {tsQuality.valid === tsQuality.total && tsQuality.total > 0 && <span className="ml-2 text-green-700">✓ all resolvable</span>}
-                  </span>
-                  <span className="text-[9px] font-mono text-zinc-700">
-                    Schema: <span className="text-zinc-500">{schemaVersion}</span> / <span className="text-zinc-600">{DATA_SCHEMA_VERSION}</span>
-                    {schemaVersion < DATA_SCHEMA_VERSION && <span className="text-amber-600 ml-1">↑ outdated</span>}
-                    {schemaVersion >= DATA_SCHEMA_VERSION && <span className="text-green-800 ml-1">✓</span>}
-                  </span>
-                  <span className="text-[9px] font-mono text-zinc-700">
-                    Migration: <span className={migrationRan ? "text-blue-600" : "text-zinc-700"}>{migrationRan ? "ran" : "skipped"}</span>
-                  </span>
-                  {(() => {
-                    const first = calls[0];
-                    if (!first) return null;
-                    const rawVal = (first as Record<string, unknown>).rawTime ?? first.time ?? "—";
-                    const parsedHour = getHourKey(first);
-                    return (
-                      <span className="text-[9px] font-mono text-zinc-700">
-                        First call raw time: <span className="text-zinc-500">{String(rawVal).slice(0, 20)}</span>
-                        {" · "}parsed hour: <span className={parsedHour !== null ? "text-green-700" : "text-red-700"}>{parsedHour !== null ? parsedHour : "invalid"}</span>
-                      </span>
-                    );
-                  })()}
-                </div>
-                {/* Manual repair button + result */}
-                <div className="flex items-center gap-3 flex-wrap">
-                  <button
-                    onClick={() => {
-                      const result = runSchemaRepair();
-                      setSchemaRepairResult(result);
-                      setSchemaVersion(DATA_SCHEMA_VERSION);
-                      setCalls(loadCalls());
-                      setRepairMsg(`Repaired ${result.timestampRepaired} calls. Valid timestamps: ${calls.filter((c) => getCallDate(c) !== null).length + result.timestampRepaired} / ${result.total}.`);
-                      setTimeout(() => setRepairMsg(null), 6000);
-                    }}
-                    className="text-[9px] uppercase tracking-widest font-mono px-3 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-400 border border-zinc-700 transition-colors">
-                    Repair Production Timestamps
-                  </button>
-                  {repairMsg && (
-                    <span className="text-[9px] font-mono text-green-500">{repairMsg}</span>
-                  )}
-                  {schemaRepairResult && !repairMsg && (
-                    <span className="text-[9px] font-mono text-zinc-700">
-                      Last repair: ts={schemaRepairResult.timestampRepaired} purged={schemaRepairResult.purgedCount} status={schemaRepairResult.statusFixed} total={schemaRepairResult.total}
-                    </span>
-                  )}
-                </div>
-              </div>
-            )}
-
             <Sec title="Status & Callers">
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
                 {/* By Status pie */}
@@ -1206,6 +1144,26 @@ export default function Dashboard() {
                         <span className={migrateResult.after["Other"] === 0 ? "text-green-400" : "text-amber-400"}>{migrateResult.after["Other"] ?? 0}</span>
                       </span>
                     </div>
+                  )}
+                </div>
+              </div>
+              {/* Repair timestamps */}
+              <div className="border-t border-zinc-800 pt-3">
+                <p className="text-[10px] text-zinc-600 mb-2">Re-derive all timestamps from raw source fields. Useful if chart hours look wrong after an import.</p>
+                <div className="flex items-center gap-3 flex-wrap">
+                  <Btn onClick={() => {
+                    const result = runSchemaRepair();
+                    setSchemaRepairResult(result);
+                    setSchemaVersion(DATA_SCHEMA_VERSION);
+                    setCalls(loadCalls());
+                    setRepairMsg(`Repaired ${result.timestampRepaired} calls. Valid: ${result.total - result.purgedCount} / ${result.total + result.purgedCount}.`);
+                    setTimeout(() => setRepairMsg(null), 6000);
+                  }} variant="ghost" small>Repair Timestamps</Btn>
+                  {repairMsg && <span className="text-[10px] font-mono text-green-500">{repairMsg}</span>}
+                  {schemaRepairResult && !repairMsg && (
+                    <span className="text-[10px] font-mono text-zinc-600">
+                      Last: ts={schemaRepairResult.timestampRepaired} purged={schemaRepairResult.purgedCount} status={schemaRepairResult.statusFixed} total={schemaRepairResult.total}
+                    </span>
                   )}
                 </div>
               </div>
