@@ -33,6 +33,21 @@ function normalizeStatus(raw: string): CallStatus {
   return "Other";
 }
 
+// Single canonical function for deriving a CallStatus from any notes/info text.
+// Used both by import parsers and the stored-call migration.
+// Notes field contains the original MicroSIP Info value which is the most reliable signal.
+export function normalizeStoredStatus(currentStatus: CallStatus, notes: string): CallStatus {
+  const n = notes.trim().toLowerCase();
+  if (n.includes("answered elsewhere")) return "Answered";
+  if (n.includes("call ended")) return "Call Ended";
+  if (n.includes("cancelled") || n.includes("canceled")) return "Canceled";
+  if (n.includes("declined")) return "Missed";
+  if (n.includes("busy")) return "Missed";
+  if (n.includes("no answer")) return "Missed";
+  if (n.includes("voicemail") || n.includes("voice mail")) return "Voicemail";
+  return currentStatus;
+}
+
 // MicroSIP two-field resolution:
 // 1. Inspect Info for descriptive keywords (highest priority — this is what MicroSIP fills in)
 // 2. Fall back to Type code only if Info gives no signal

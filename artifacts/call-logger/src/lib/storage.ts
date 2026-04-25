@@ -1,4 +1,5 @@
 import { type StoredCall, type ImportResult } from "./types";
+import { normalizeStoredStatus } from "./parsers";
 
 const CALLS_KEY = "ps_call_logger_calls";
 const LAST_IMPORT_KEY = "ps_call_logger_last_import";
@@ -34,6 +35,36 @@ export function loadLastImport(): ImportResult | null {
 
 export function saveLastImport(result: ImportResult): void {
   localStorage.setItem(LAST_IMPORT_KEY, JSON.stringify(result));
+}
+
+// Re-derives CallStatus from the notes field for every stored call.
+// Fixes records imported before the Info-first resolution logic was added.
+export function migrateNormalizeStatuses(): {
+  fixed: number;
+  before: Record<string, number>;
+  after: Record<string, number>;
+} {
+  const calls = loadCalls();
+
+  const before: Record<string, number> = {};
+  calls.forEach((c) => { before[c.status] = (before[c.status] ?? 0) + 1; });
+
+  let fixed = 0;
+  const migrated = calls.map((c) => {
+    const corrected = normalizeStoredStatus(c.status, c.notes);
+    if (corrected === c.status) return c;
+    fixed++;
+    // Rebuild the dedupeKey with the corrected status (last pipe-delimited segment)
+    const keyParts = c.dedupeKey.split("|");
+    keyParts[keyParts.length - 1] = corrected.toLowerCase();
+    return { ...c, status: corrected, dedupeKey: keyParts.join("|") };
+  });
+
+  const after: Record<string, number> = {};
+  migrated.forEach((c) => { after[c.status] = (after[c.status] ?? 0) + 1; });
+
+  saveCalls(migrated);
+  return { fixed, before, after };
 }
 
 export function mergeImport(

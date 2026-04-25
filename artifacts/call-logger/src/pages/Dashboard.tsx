@@ -4,7 +4,7 @@ import {
   PieChart, Pie, Cell, Legend,
 } from "recharts";
 import { type StoredCall, type CallStatus, type ImportResult } from "@/lib/types";
-import { loadCalls, saveCalls, clearCalls, loadLastImport, saveLastImport, mergeImport } from "@/lib/storage";
+import { loadCalls, saveCalls, clearCalls, loadLastImport, saveLastImport, mergeImport, migrateNormalizeStatuses } from "@/lib/storage";
 import { parseText, toStoredCall, FORMAT_LABELS, type DetectedFormat } from "@/lib/parsers";
 import { generateMasterCSV } from "@/lib/report";
 import { formatDuration, formatTimestamp } from "@/lib/utils";
@@ -101,6 +101,13 @@ export default function Dashboard() {
 
   useEffect(() => { saveCalls(calls); }, [calls]);
 
+  // Auto-migrate on first load: re-derive status from notes for any stored "Other" calls.
+  useEffect(() => {
+    const { fixed } = migrateNormalizeStatuses();
+    if (fixed > 0) setCalls(loadCalls());
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // ── Import state
   const [importOpen, setImportOpen] = useState(false);
   const [showPaste, setShowPaste] = useState(false);
@@ -135,6 +142,7 @@ export default function Dashboard() {
 
   // ── Dev tools
   const [showDevTools, setShowDevTools] = useState(false);
+  const [migrateResult, setMigrateResult] = useState<{ fixed: number; before: Record<string, number>; after: Record<string, number> } | null>(null);
 
   // ──────────────────────────────────────────────
   // Derived data
@@ -180,6 +188,18 @@ export default function Dashboard() {
     const map: Record<string, number> = {};
     calls.forEach((c) => { map[c.status] = (map[c.status] ?? 0) + 1; });
     return Object.entries(map).map(([status, count]) => ({ status, count, fill: STATUS_COLORS[status] ?? "#71717a" }));
+  }, [calls]);
+
+  // Debug: calls still stuck as "Other" — surface top notes values to diagnose
+  const otherDebug = useMemo(() => {
+    const others = calls.filter((c) => c.status === "Other");
+    const noteCounts: Record<string, number> = {};
+    others.forEach((c) => {
+      const key = c.notes.trim() || "(no info)";
+      noteCounts[key] = (noteCounts[key] ?? 0) + 1;
+    });
+    const top = Object.entries(noteCounts).sort(([, a], [, b]) => b - a).slice(0, 5);
+    return { count: others.length, top };
   }, [calls]);
 
   const repeatCallerChart = useMemo(() =>
@@ -599,9 +619,9 @@ export default function Dashboard() {
                 <div className="border border-zinc-700 bg-zinc-900 p-4">
                   <p className="text-[10px] uppercase tracking-widest text-zinc-500 mb-3">By Status</p>
                   {callsByStatus.length === 0 ? <EmptyChart label="No data" /> : (
-                    <ResponsiveContainer width="100%" height={180}>
+                    <ResponsiveContainer width="100%" height={160}>
                       <PieChart>
-                        <Pie data={callsByStatus} dataKey="count" nameKey="status" cx="50%" cy="50%" outerRadius={65} innerRadius={28} stroke="none" paddingAngle={2}>
+                        <Pie data={callsByStatus} dataKey="count" nameKey="status" cx="50%" cy="50%" outerRadius={58} innerRadius={24} stroke="none" paddingAngle={2}>
                           {callsByStatus.map((e, i) => <Cell key={i} fill={e.fill} />)}
                         </Pie>
                         <Tooltip content={<CT />} />
@@ -609,6 +629,22 @@ export default function Dashboard() {
                       </PieChart>
                     </ResponsiveContainer>
                   )}
+                  {/* Other debug */}
+                  <div className="border-t border-zinc-800 pt-2 mt-1">
+                    <p className="text-[9px] font-mono text-zinc-600">
+                      Other: <span className={otherDebug.count > 0 ? "text-red-400 font-bold" : "text-zinc-600"}>{otherDebug.count}</span>
+                      {otherDebug.count === 0 && <span className="text-green-700 ml-1">✓ clean</span>}
+                    </p>
+                    {otherDebug.count > 0 && otherDebug.top.length > 0 && (
+                      <div className="mt-1 space-y-0.5">
+                        {otherDebug.top.map(([note, n], i) => (
+                          <p key={i} className="text-[9px] font-mono text-zinc-700 truncate">
+                            <span className="text-red-700">{n}×</span> {note}
+                          </p>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                 </div>
                 <div className="border border-zinc-700 bg-zinc-900 p-4">
                   <p className="text-[10px] uppercase tracking-widest text-zinc-500 mb-3">Repeat Callers</p>
@@ -817,9 +853,27 @@ export default function Dashboard() {
             {showDevTools ? "▼" : "▶"} Developer / Demo Tools
           </button>
           {showDevTools && (
-            <div className="mt-3 border border-zinc-800 bg-zinc-900/40 p-4 space-y-2">
-              <p className="text-[10px] text-zinc-600">Load sample data for testing. Will not appear by default on first load.</p>
-              <div className="flex gap-2">
+            <div className="mt-3 border border-zinc-800 bg-zinc-900/40 p-4 space-y-3">
+              <div>
+                <p className="text-[10px] text-zinc-600 mb-2">Re-derive status from notes field for all stored calls. Fixes records imported before Info-first resolution.</p>
+                <div className="flex items-center gap-3 flex-wrap">
+                  <Btn onClick={() => {
+                    const result = migrateNormalizeStatuses();
+                    setCalls(loadCalls());
+                    setMigrateResult(result);
+                  }} variant="ghost" small>Re-normalize Stored Calls</Btn>
+                  {migrateResult && (
+                    <span className="text-[10px] font-mono text-zinc-500">
+                      Fixed <span className="text-green-400 font-bold">{migrateResult.fixed}</span> call{migrateResult.fixed !== 1 ? "s" : ""}.
+                      Other: <span className="text-red-400">{migrateResult.before["Other"] ?? 0}</span>
+                      {" → "}
+                      <span className={migrateResult.after["Other"] === 0 ? "text-green-400" : "text-amber-400"}>{migrateResult.after["Other"] ?? 0}</span>
+                    </span>
+                  )}
+                </div>
+              </div>
+              <div className="border-t border-zinc-800 pt-3">
+                <p className="text-[10px] text-zinc-600 mb-2">Load sample data for testing. Will not appear by default on first load.</p>
                 <Btn onClick={handleLoadDemo} variant="ghost" small>Load Demo Data</Btn>
               </div>
             </div>
