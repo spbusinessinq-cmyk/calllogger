@@ -1,0 +1,263 @@
+Do a 30-point production enhancement pass for Pacific Systems Call Logger.
+
+Context:
+The app is now live on EdgeOne and builds successfully. Do not break deployment.
+Keep it static/frontend-only. Keep localStorage. No backend. No auth. No database.
+The app’s purpose is simple:
+1. Import MicroSIP / Callcentric call logs
+2. Deduplicate them
+3. Visualize call data
+4. Generate a one-page report
+
+Current issue:
+Calls by Hour and Calls by Day are not rendering correctly after MicroSIP import. The metrics show calls exist, but those charts are mostly empty or wrong.
+
+Fix and enhance everything below.
+
+━━━━━━━━━━━━━━━━━━━━
+CRITICAL DATA FIXES
+━━━━━━━━━━━━━━━━━━━━
+
+1. Fix Calls by Hour chart
+MicroSIP Time is Unix timestamp seconds.
+Convert it correctly into local Date objects.
+Extract local hour from parsed timestamp.
+Do not rely on already-formatted display strings.
+
+2. Fix Calls by Day chart
+Group calls by local YYYY-MM-DD date derived from parsed timestamp.
+If Standard CSV provides Date + Time, parse that into a Date object and also store YYYY-MM-DD.
+
+3. Add canonical timestamp field
+Every call record must have:
+startedAtISO
+dateKey
+hourKey
+
+Examples:
+startedAtISO: 2026-04-25T10:43:41.000Z or valid ISO
+dateKey: 2026-04-25
+hourKey: 22
+
+4. Migrate old stored calls
+On app startup, run a migration:
+- Recalculate startedAtISO, dateKey, hourKey from raw timestamp/date/time
+- Save corrected calls back to localStorage
+- Rebuild charts immediately
+
+5. Add timestamp debug if parsing fails
+If a row cannot parse time, store parseError and show it in an Import Errors panel.
+Do not silently drop it.
+
+━━━━━━━━━━━━━━━━━━━━
+IMPORT QUALITY
+━━━━━━━━━━━━━━━━━━━━
+
+6. MicroSIP CSV import
+For header:
+Type,Name,Number,Time,Duration,Info
+Time = Unix timestamp seconds.
+Duration = seconds.
+Convert both correctly.
+
+7. MicroSIP XML import
+For:
+<call type="" name="" number="" time="" duration="" info="" />
+Time = Unix timestamp seconds.
+Duration = seconds.
+Convert correctly.
+
+8. MicroSIP INI import
+For:
+0=number;name;type;unix_time;duration_seconds;info
+Convert Unix timestamp correctly.
+
+9. Standard CSV import
+For:
+Name,Number,Date,Time,Duration,Status,Notes
+Parse Date + Time robustly.
+Accept:
+2026-04-25 + 10:43 PM
+2026-04-25 + 22:43:41
+4/25/2026 + 10:43:41 PM
+Apr 25 2026 + 10:43 PM
+
+10. Preserve raw fields
+Keep:
+rawTime
+rawDate
+rawType
+rawInfo
+rawSourceLine if possible
+This helps debugging later.
+
+━━━━━━━━━━━━━━━━━━━━
+STATUS FIXES
+━━━━━━━━━━━━━━━━━━━━
+
+11. Keep Other at zero when possible
+Use Info-first normalization:
+Answered Elsewhere → Answered
+Call Ended → Call Ended
+Canceled/Cancelled → Canceled
+Declined → Missed
+Busy → Missed
+No Answer → Missed
+Voicemail/Voice Mail → Voicemail
+Fallback to type only if Info is blank/unknown.
+
+12. Add “Other Debug” only when needed
+If Other count > 0, show:
+Top unmatched Info values
+Top unmatched raw types
+Otherwise show:
+Other: 0 ✓ clean
+
+13. Treat Answered Elsewhere as Answered
+Charts and metrics must count it under Answered / Ended, not Other.
+
+━━━━━━━━━━━━━━━━━━━━
+CHART ENHANCEMENTS
+━━━━━━━━━━━━━━━━━━━━
+
+14. Calls by Hour chart
+Show 24 hours if data spans full day or active range if compact.
+Label:
+12AM, 1AM, 2AM... 11PM
+Show zero bars lightly if no calls.
+
+15. Calls by Day chart
+Show last 7 days with call counts.
+If all calls are on one day, still show that day clearly.
+No blank chart when data exists.
+
+16. Add hover/tooltips or labels
+Each bar should show:
+Hour/day + count
+
+17. Add chart empty states
+If chart has no valid timestamp data:
+“No valid timestamp data found. Check import format.”
+
+18. Add status chart legend clarity
+Legend should use:
+Answered
+Call Ended
+Missed
+Canceled
+Voicemail
+Outgoing
+Other only if exists
+
+19. Add “Follow-Up Volume” mini chart
+Small bar:
+Missed + Canceled + Voicemail by day
+
+20. Add “Import Health” mini card
+Show:
+Valid rows
+Rows imported
+Duplicates skipped
+Rows with parse errors
+Timestamp errors
+
+━━━━━━━━━━━━━━━━━━━━
+UI / UX CLEANUP
+━━━━━━━━━━━━━━━━━━━━
+
+21. Keep dashboard hero clean
+Metrics and charts should be the main view.
+Import panel should stay compact/collapsible.
+Do not put giant import box at top.
+
+22. Add clear empty state
+On first load:
+“No call logs imported yet. Import a MicroSIP or Callcentric export to begin.”
+
+23. Add “Clear All Calls” confirmation
+Require typing:
+CLEAR
+before deleting all stored calls.
+
+24. Add “Rebuild / Recalculate Data” button
+In Developer / Tools:
+- Re-normalize statuses
+- Recalculate timestamps
+- Rebuild dedupe keys
+- Refresh charts
+
+Show result:
+“Rebuilt X calls. Timestamp errors: Y. Other reduced from A to B.”
+
+25. Add “Data Quality” panel
+Small collapsible panel:
+- Total stored calls
+- Valid timestamps
+- Missing timestamps
+- Other status count
+- Duplicate keys detected
+- Last migration time
+
+━━━━━━━━━━━━━━━━━━━━
+REPORT ENHANCEMENTS
+━━━━━━━━━━━━━━━━━━━━
+
+26. One-page report should include working visuals
+Include:
+- Calls by hour mini chart
+- Calls by day mini chart
+- Status breakdown mini chart
+- Top repeat callers
+- Follow-up targets
+
+27. Report should handle empty charts
+If there is no timestamp data, state it clearly in the report.
+
+28. Report should print clean
+Make sure print CSS fits one page:
+- no app chrome
+- no scrollbars
+- compact charts
+- no clipped sections
+
+━━━━━━━━━━━━━━━━━━━━
+EDGEONE SAFETY
+━━━━━━━━━━━━━━━━━━━━
+
+29. Do not reintroduce workspace dependencies
+No catalog:
+No workspace:
+No tsconfig extends outside repo
+No Replit-only plugins
+No backend requirement
+
+30. Verify build
+After changes, run:
+npm install
+npm run build
+
+Confirm:
+- build succeeds
+- output remains dist/public
+- app still works as static frontend on EdgeOne
+- localStorage still stores imported calls
+- charts update after import
+
+━━━━━━━━━━━━━━━━━━━━
+FINAL ACCEPTANCE TEST
+━━━━━━━━━━━━━━━━━━━━
+
+Use a MicroSIP CSV sample with:
+Type,Name,Number,Time,Duration,Info
+
+Import it.
+Verify:
+- Total calls increases
+- Other is 0 if all Info values are known
+- Calls by Hour displays real bars
+- Calls by Day displays real bars
+- Follow-up targets populate
+- One-page report includes charts
+- Re-import same file skips duplicates
+- Refresh page keeps data
+- Build passes

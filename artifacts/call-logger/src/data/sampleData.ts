@@ -12,15 +12,20 @@ function makeCall(
   notes: string
 ): StoredCall {
   const phone = phoneNumber.replace(/\D/g, "");
-  const hour = parseInt(time.split(":")[0], 10);
+  const hourKey = parseInt(time.split(":")[0], 10);
   const dedupeKey = makeDedupeKey({ phoneNumber: phone, callerName, date, time, durationSeconds, status });
+  let startedAtISO = "";
+  try {
+    const d = new Date(`${date}T${time}:00`);
+    if (!isNaN(d.getTime())) startedAtISO = d.toISOString();
+  } catch { /* ignore */ }
   return {
     callerName,
     phoneNumber: phone,
     maskedNumber: maskPhone(phone),
     date,
     time,
-    hour,
+    hour: hourKey,
     durationSeconds,
     duration: formatDuration(durationSeconds),
     status,
@@ -28,6 +33,9 @@ function makeCall(
     source: "sample",
     dedupeKey,
     importedAt: new Date().toISOString(),
+    startedAtISO,
+    dateKey: date,
+    hourKey,
   };
 }
 

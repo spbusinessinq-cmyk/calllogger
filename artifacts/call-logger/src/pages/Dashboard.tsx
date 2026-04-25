@@ -4,7 +4,11 @@ import {
   PieChart, Pie, Cell, Legend,
 } from "recharts";
 import { type StoredCall, type CallStatus, type ImportResult } from "@/lib/types";
-import { loadCalls, saveCalls, clearCalls, loadLastImport, saveLastImport, mergeImport, migrateNormalizeStatuses } from "@/lib/storage";
+import {
+  loadCalls, saveCalls, clearCalls, loadLastImport, saveLastImport,
+  mergeImport, migrateAll, loadLastMigrationTime,
+  type MigrateResult,
+} from "@/lib/storage";
 import { parseText, toStoredCall, FORMAT_LABELS, type DetectedFormat } from "@/lib/parsers";
 import { generateMasterCSV } from "@/lib/report";
 import { formatDuration, formatTimestamp } from "@/lib/utils";
@@ -29,6 +33,13 @@ const SOURCE_LABELS: Record<string, string> = {
   "microsip-xml": "MicroSIP XML", "callcentric-csv": "Callcentric", unknown: "Unknown",
 };
 const FILTER_STATUSES = ["All", "Answered", "Call Ended", "Missed", "Canceled", "Voicemail", "Outgoing", "Repeat Callers"];
+
+function hourLabel(h: number): string {
+  if (h === 0) return "12AM";
+  if (h < 12) return `${h}AM`;
+  if (h === 12) return "12PM";
+  return `${h - 12}PM`;
+}
 
 // ──────────────────────────────────────────────
 // UI primitives
@@ -85,7 +96,7 @@ function Btn({ onClick, children, variant = "default", disabled, small }: {
 function EmptyChart({ label }: { label: string }) {
   return (
     <div className="flex items-center justify-center h-[160px] border border-dashed border-zinc-800">
-      <p className="text-[10px] text-zinc-700 uppercase tracking-widest">{label}</p>
+      <p className="text-[10px] text-zinc-700 uppercase tracking-widest text-center px-2">{label}</p>
     </div>
   );
 }
@@ -101,10 +112,10 @@ export default function Dashboard() {
 
   useEffect(() => { saveCalls(calls); }, [calls]);
 
-  // Auto-migrate on first load: re-derive status from notes for any stored "Other" calls.
+  // Auto-migrate on first load: fix statuses + backfill timestamp fields
   useEffect(() => {
-    const { fixed } = migrateNormalizeStatuses();
-    if (fixed > 0) setCalls(loadCalls());
+    const result = migrateAll();
+    if (result.fixed > 0 || result.timestampFixed > 0) setCalls(loadCalls());
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -142,7 +153,10 @@ export default function Dashboard() {
 
   // ── Dev tools
   const [showDevTools, setShowDevTools] = useState(false);
-  const [migrateResult, setMigrateResult] = useState<{ fixed: number; before: Record<string, number>; after: Record<string, number> } | null>(null);
+  const [migrateResult, setMigrateResult] = useState<MigrateResult | null>(null);
+
+  // ── Data quality panel
+  const [showDataQuality, setShowDataQuality] = useState(false);
 
   // ──────────────────────────────────────────────
   // Derived data
@@ -160,29 +174,59 @@ export default function Dashboard() {
     const avgSec = withDur.length ? Math.round(withDur.reduce((a, c) => a + c.durationSeconds, 0) / withDur.length) : 0;
     const longest = calls.reduce<StoredCall | null>((a, b) => (!a || b.durationSeconds > a.durationSeconds ? b : a), null);
     const hourCounts: Record<number, number> = {};
-    calls.forEach((c) => { hourCounts[c.hour] = (hourCounts[c.hour] ?? 0) + 1; });
+    calls.forEach((c) => { const h = c.hourKey ?? c.hour; hourCounts[h] = (hourCounts[h] ?? 0) + 1; });
     const peakEntry = Object.entries(hourCounts).sort(([, a], [, b]) => b - a)[0];
-    const peakHour = peakEntry ? `${Number(peakEntry[0]) % 12 || 12}${Number(peakEntry[0]) >= 12 ? "PM" : "AM"}` : "—";
+    const peakHour = peakEntry ? hourLabel(Number(peakEntry[0])) : "—";
     return { total, answered, missed, voicemail, outgoing, repeatCallers, avgSec, longest, peakHour, nameCounts };
   }, [calls]);
 
+  // Calls by hour — use hourKey, show active range, 12AM-11PM labels
   const callsByHour = useMemo(() => {
     const map: Record<number, number> = {};
-    for (let h = 7; h <= 18; h++) map[h] = 0;
-    calls.forEach((c) => { if (c.hour >= 7 && c.hour <= 18) map[c.hour] = (map[c.hour] ?? 0) + 1; });
-    return Object.entries(map).sort(([a], [b]) => Number(a) - Number(b)).map(([h, count]) => ({
-      hour: `${Number(h) % 12 || 12}${Number(h) >= 12 ? "p" : "a"}`, count,
+    for (let h = 0; h < 24; h++) map[h] = 0;
+    calls.forEach((c) => {
+      const h = c.hourKey ?? c.hour ?? 0;
+      map[h] = (map[h] ?? 0) + 1;
+    });
+
+    const allHours = Array.from({ length: 24 }, (_, h) => ({ h, count: map[h] }));
+    const nonZeroIndices = allHours.map((e, i) => (e.count > 0 ? i : -1)).filter((i) => i >= 0);
+
+    let startIdx = 0;
+    let endIdx = 23;
+    if (nonZeroIndices.length > 0) {
+      startIdx = Math.max(0, nonZeroIndices[0] - 1);
+      endIdx = Math.min(23, nonZeroIndices[nonZeroIndices.length - 1] + 1);
+    }
+
+    return allHours.slice(startIdx, endIdx + 1).map(({ h, count }) => ({
+      hour: hourLabel(h),
+      count,
+      dim: count === 0,
     }));
   }, [calls]);
 
+  const hasHourData = useMemo(() => calls.some((c) => (c.dateKey || c.date)), [calls]);
+
+  // Calls by day — use dateKey, last 14 days
   const callsByDay = useMemo(() => {
     const map: Record<string, number> = {};
-    calls.forEach((c) => { if (c.date) map[c.date] = (map[c.date] ?? 0) + 1; });
-    return Object.entries(map).sort(([a], [b]) => a.localeCompare(b)).map(([date, count]) => {
-      try { const d = new Date(date + "T12:00:00"); return { day: d.toLocaleDateString("en-US", { month: "short", day: "numeric" }), count }; }
-      catch { return { day: date, count }; }
+    calls.forEach((c) => {
+      const key = (c.dateKey || c.date || "").slice(0, 10);
+      if (key && /^\d{4}-\d{2}-\d{2}$/.test(key)) map[key] = (map[key] ?? 0) + 1;
+    });
+    const entries = Object.entries(map).sort(([a], [b]) => a.localeCompare(b)).slice(-14);
+    return entries.map(([date, count]) => {
+      try {
+        const d = new Date(date + "T12:00:00");
+        return { day: d.toLocaleDateString("en-US", { month: "short", day: "numeric" }), count, date };
+      } catch {
+        return { day: date, count, date };
+      }
     });
   }, [calls]);
+
+  const hasDayData = useMemo(() => calls.some((c) => c.dateKey || c.date), [calls]);
 
   const callsByStatus = useMemo(() => {
     const map: Record<string, number> = {};
@@ -190,7 +234,6 @@ export default function Dashboard() {
     return Object.entries(map).map(([status, count]) => ({ status, count, fill: STATUS_COLORS[status] ?? "#71717a" }));
   }, [calls]);
 
-  // Debug: calls still stuck as "Other" — surface top notes values to diagnose
   const otherDebug = useMemo(() => {
     const others = calls.filter((c) => c.status === "Other");
     const noteCounts: Record<string, number> = {};
@@ -215,6 +258,24 @@ export default function Dashboard() {
     [calls]
   );
 
+  // Follow-up volume by day (Missed + Canceled + Voicemail)
+  const followUpByDay = useMemo(() => {
+    const map: Record<string, number> = {};
+    calls.filter((c) => c.status === "Missed" || c.status === "Canceled" || c.status === "Voicemail")
+      .forEach((c) => {
+        const key = (c.dateKey || c.date || "").slice(0, 10);
+        if (key && /^\d{4}-\d{2}-\d{2}$/.test(key)) map[key] = (map[key] ?? 0) + 1;
+      });
+    return Object.entries(map).sort(([a], [b]) => a.localeCompare(b)).slice(-7).map(([date, count]) => {
+      try {
+        const d = new Date(date + "T12:00:00");
+        return { day: d.toLocaleDateString("en-US", { month: "short", day: "numeric" }), count };
+      } catch {
+        return { day: date, count };
+      }
+    });
+  }, [calls]);
+
   const followUpTargets = useMemo(() => {
     const map: Record<string, { name: string; number: string; reasons: Set<string>; lastTime: string; count: number }> = {};
     calls.filter((c) => c.status === "Missed" || c.status === "Voicemail" || c.status === "Canceled" || c.notes.toLowerCase().includes("follow"))
@@ -234,6 +295,20 @@ export default function Dashboard() {
     });
     return Object.values(map).sort((a, b) => b.count - a.count).slice(0, 10);
   }, [calls, metrics.nameCounts]);
+
+  // Data quality stats
+  const dataQuality = useMemo(() => {
+    const total = calls.length;
+    const withTimestamp = calls.filter((c) => c.startedAtISO && c.startedAtISO !== "").length;
+    const withDateKey = calls.filter((c) => c.dateKey && c.dateKey !== "").length;
+    const missingTimestamp = total - withTimestamp;
+    const otherCount = calls.filter((c) => c.status === "Other").length;
+    const lastMigration = loadLastMigrationTime();
+    const seenKeys = new Set<string>();
+    let duplicateKeys = 0;
+    calls.forEach((c) => { if (seenKeys.has(c.dedupeKey)) { duplicateKeys++; } else { seenKeys.add(c.dedupeKey); } });
+    return { total, withTimestamp, withDateKey, missingTimestamp, otherCount, duplicateKeys, lastMigration };
+  }, [calls]);
 
   const filtered = useMemo(() => {
     let d = calls;
@@ -269,11 +344,12 @@ export default function Dashboard() {
     const stored = rows.map((r) => toStoredCall(r, format as StoredCall["source"]));
     setAllParsed(stored);
     setPreviewRows(stored.slice(0, 5));
-    // Compute per-status breakdown for debug display
     const counts: Record<string, number> = {};
     stored.forEach((c) => { counts[c.status] = (counts[c.status] ?? 0) + 1; });
     setStatusDebug(counts);
-    setImportMsg({ text: `Auto-detected: ${FORMAT_LABELS[format]}. ${rows.length} row${rows.length !== 1 ? "s" : ""} ready — review preview below.`, type: "ok" });
+    const tsErrors = rows.filter((r) => r.parseError || !r.dateKey).length;
+    const tsNote = tsErrors > 0 ? ` · ${tsErrors} timestamp warning${tsErrors !== 1 ? "s" : ""}` : "";
+    setImportMsg({ text: `Auto-detected: ${FORMAT_LABELS[format]}. ${rows.length} row${rows.length !== 1 ? "s" : ""} ready — review preview below.${tsNote}`, type: tsErrors > 0 ? "warn" : "ok" });
   }, []);
 
   const handleFileRead = useCallback((file: File) => {
@@ -292,7 +368,6 @@ export default function Dashboard() {
 
     const readNext = (idx: number) => {
       if (idx >= matching.length) {
-        // dedupe across files too
         const deduped = allRows.filter((r) => { if (seenKeys.has(r.dedupeKey)) return false; seenKeys.add(r.dedupeKey); return true; });
         const { imported, skipped } = mergeImport(deduped);
         totalImported = imported; totalSkipped += skipped;
@@ -353,7 +428,8 @@ export default function Dashboard() {
     const mM = durationRaw.match(/(\d+)m/); const sM = durationRaw.match(/(\d+)s/);
     if (mM) dur += parseInt(mM[1]) * 60; if (sM) dur += parseInt(sM[1]);
     if (!mM && !sM && /^\d+$/.test(durationRaw)) dur = parseInt(durationRaw || "0");
-    const newCall = toStoredCall({ callerName, phoneNumber, date, time, durationSeconds: dur, status, notes }, "manual");
+    const hour = time ? parseInt(time.split(":")[0], 10) : 0;
+    const newCall = toStoredCall({ callerName, phoneNumber, date, time, durationSeconds: dur, status, notes, startedAtISO: "", dateKey: date, hourKey: isNaN(hour) ? 0 : hour }, "manual");
     const existing = loadCalls();
     if (existing.some((c) => c.dedupeKey === newCall.dedupeKey)) { setManualMsg("Duplicate — call already exists."); return; }
     const updated = [...existing, newCall]; saveCalls(updated); setCalls(updated);
@@ -588,34 +664,72 @@ export default function Dashboard() {
         {hasData && (
           <>
             <Sec title="Call Volume">
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+                {/* Calls by Hour */}
                 <div className="border border-zinc-700 bg-zinc-900 p-4">
                   <p className="text-[10px] uppercase tracking-widest text-zinc-500 mb-3">Calls by Hour</p>
-                  <ResponsiveContainer width="100%" height={160}>
-                    <BarChart data={callsByHour} barCategoryGap="20%">
-                      <XAxis dataKey="hour" tick={{ fontSize: 9, fontFamily: "monospace", fill: "#52525b" }} axisLine={false} tickLine={false} />
-                      <YAxis allowDecimals={false} tick={{ fontSize: 9, fontFamily: "monospace", fill: "#52525b" }} axisLine={false} tickLine={false} width={20} />
-                      <Tooltip content={<CT />} cursor={{ fill: "rgba(255,255,255,0.03)" }} />
-                      <Bar dataKey="count" fill="#3b82f6" name="Calls" radius={[2, 2, 0, 0]} />
-                    </BarChart>
-                  </ResponsiveContainer>
+                  {!hasHourData ? (
+                    <EmptyChart label="No valid timestamp data found. Check import format." />
+                  ) : callsByHour.length === 0 ? (
+                    <EmptyChart label="No hourly data" />
+                  ) : (
+                    <ResponsiveContainer width="100%" height={160}>
+                      <BarChart data={callsByHour} barCategoryGap="15%">
+                        <XAxis dataKey="hour" tick={{ fontSize: 8, fontFamily: "monospace", fill: "#52525b" }} axisLine={false} tickLine={false} interval={0} angle={-45} textAnchor="end" height={28} />
+                        <YAxis allowDecimals={false} tick={{ fontSize: 9, fontFamily: "monospace", fill: "#52525b" }} axisLine={false} tickLine={false} width={20} />
+                        <Tooltip content={<CT />} cursor={{ fill: "rgba(255,255,255,0.03)" }} />
+                        <Bar dataKey="count" name="Calls" radius={[2, 2, 0, 0]}>
+                          {callsByHour.map((entry, i) => (
+                            <Cell key={i} fill={entry.dim ? "#1e293b" : "#3b82f6"} />
+                          ))}
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
+                  )}
                 </div>
+
+                {/* Calls by Day */}
                 <div className="border border-zinc-700 bg-zinc-900 p-4">
                   <p className="text-[10px] uppercase tracking-widest text-zinc-500 mb-3">Calls by Day</p>
-                  <ResponsiveContainer width="100%" height={160}>
-                    <BarChart data={callsByDay} barCategoryGap="20%">
-                      <XAxis dataKey="day" tick={{ fontSize: 9, fontFamily: "monospace", fill: "#52525b" }} axisLine={false} tickLine={false} />
-                      <YAxis allowDecimals={false} tick={{ fontSize: 9, fontFamily: "monospace", fill: "#52525b" }} axisLine={false} tickLine={false} width={20} />
-                      <Tooltip content={<CT />} cursor={{ fill: "rgba(255,255,255,0.03)" }} />
-                      <Bar dataKey="count" fill="#22c55e" name="Calls" radius={[2, 2, 0, 0]} />
-                    </BarChart>
-                  </ResponsiveContainer>
+                  {!hasDayData ? (
+                    <EmptyChart label="No valid timestamp data found. Check import format." />
+                  ) : callsByDay.length === 0 ? (
+                    <EmptyChart label="No date data" />
+                  ) : (
+                    <ResponsiveContainer width="100%" height={160}>
+                      <BarChart data={callsByDay} barCategoryGap="20%">
+                        <XAxis dataKey="day" tick={{ fontSize: 9, fontFamily: "monospace", fill: "#52525b" }} axisLine={false} tickLine={false} />
+                        <YAxis allowDecimals={false} tick={{ fontSize: 9, fontFamily: "monospace", fill: "#52525b" }} axisLine={false} tickLine={false} width={20} />
+                        <Tooltip content={<CT />} cursor={{ fill: "rgba(255,255,255,0.03)" }} />
+                        <Bar dataKey="count" fill="#22c55e" name="Calls" radius={[2, 2, 0, 0]} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  )}
+                </div>
+
+                {/* Follow-Up Volume by Day */}
+                <div className="border border-zinc-700 bg-zinc-900 p-4">
+                  <p className="text-[10px] uppercase tracking-widest text-zinc-500 mb-1">Follow-Up Volume</p>
+                  <p className="text-[9px] text-zinc-700 mb-3">Missed + Canceled + Voicemail by day</p>
+                  {followUpByDay.length === 0 ? (
+                    <EmptyChart label="No follow-up calls" />
+                  ) : (
+                    <ResponsiveContainer width="100%" height={148}>
+                      <BarChart data={followUpByDay} barCategoryGap="20%">
+                        <XAxis dataKey="day" tick={{ fontSize: 9, fontFamily: "monospace", fill: "#52525b" }} axisLine={false} tickLine={false} />
+                        <YAxis allowDecimals={false} tick={{ fontSize: 9, fontFamily: "monospace", fill: "#52525b" }} axisLine={false} tickLine={false} width={20} />
+                        <Tooltip content={<CT />} cursor={{ fill: "rgba(255,255,255,0.03)" }} />
+                        <Bar dataKey="count" fill="#f97316" name="Follow-Ups" radius={[2, 2, 0, 0]} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  )}
                 </div>
               </div>
             </Sec>
 
             <Sec title="Status & Callers">
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                {/* By Status pie */}
                 <div className="border border-zinc-700 bg-zinc-900 p-4">
                   <p className="text-[10px] uppercase tracking-widest text-zinc-500 mb-3">By Status</p>
                   {callsByStatus.length === 0 ? <EmptyChart label="No data" /> : (
@@ -646,6 +760,8 @@ export default function Dashboard() {
                     )}
                   </div>
                 </div>
+
+                {/* Repeat Callers */}
                 <div className="border border-zinc-700 bg-zinc-900 p-4">
                   <p className="text-[10px] uppercase tracking-widest text-zinc-500 mb-3">Repeat Callers</p>
                   {repeatCallerChart.length === 0 ? <EmptyChart label="No repeat callers" /> : (
@@ -659,6 +775,8 @@ export default function Dashboard() {
                     </ResponsiveContainer>
                   )}
                 </div>
+
+                {/* Longest Calls */}
                 <div className="border border-zinc-700 bg-zinc-900 p-4">
                   <p className="text-[10px] uppercase tracking-widest text-zinc-500 mb-3">Longest Calls</p>
                   {longestChart.length === 0 ? <EmptyChart label="No duration data" /> : (
@@ -676,6 +794,8 @@ export default function Dashboard() {
                     </ResponsiveContainer>
                   )}
                 </div>
+
+                {/* Follow-up Targets */}
                 <div className="border border-zinc-700 bg-zinc-900 p-4">
                   <p className="text-[10px] uppercase tracking-widest text-zinc-500 mb-3">Follow-up Targets</p>
                   {followUpTargets.length === 0 ? <EmptyChart label="No targets" /> : (
@@ -835,16 +955,51 @@ export default function Dashboard() {
             </div>
             {showClearConfirm && (
               <div className="mt-3 border border-red-900 bg-red-950/20 p-4 max-w-md">
-                <p className="text-xs text-red-300 mb-2">Permanently delete all {calls.length} stored calls. Type CLEAR to confirm.</p>
+                <p className="text-xs text-red-300 mb-2">Permanently delete all {calls.length} stored calls. Type <span className="font-bold text-red-200">CLEAR</span> to confirm.</p>
                 <input type="text" value={clearText} onChange={(e) => setClearText(e.target.value)} placeholder="Type CLEAR"
                   className="w-full bg-zinc-950 border border-red-800 text-xs font-mono text-zinc-300 px-3 py-2 focus:outline-none mb-2" />
                 <div className="flex gap-2">
-                  <Btn onClick={handleClearAll} variant="red" small>Confirm Delete</Btn>
+                  <Btn onClick={handleClearAll} variant="red" small disabled={clearText !== "CLEAR"}>Confirm Delete</Btn>
                   <Btn onClick={() => { setShowClearConfirm(false); setClearText(""); }} variant="ghost" small>Cancel</Btn>
                 </div>
               </div>
             )}
           </Sec>
+        )}
+
+        {/* ── DATA QUALITY PANEL ── */}
+        {hasData && (
+          <div className="border border-zinc-800">
+            <button onClick={() => setShowDataQuality(!showDataQuality)}
+              className="w-full text-left px-4 py-2.5 text-[9px] uppercase tracking-widest font-mono text-zinc-600 hover:text-zinc-400 flex items-center justify-between">
+              <span>{showDataQuality ? "▼" : "▶"} Data Quality</span>
+              <span className={`text-[8px] px-1.5 py-0.5 border ${dataQuality.otherCount > 0 || dataQuality.missingTimestamp > 0 ? "border-amber-800 text-amber-600" : "border-green-900 text-green-700"}`}>
+                {dataQuality.otherCount > 0 || dataQuality.missingTimestamp > 0 ? "Review Needed" : "✓ Good"}
+              </span>
+            </button>
+            {showDataQuality && (
+              <div className="border-t border-zinc-800 px-4 py-3 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+                {[
+                  { label: "Total Calls", value: dataQuality.total, color: "text-white" },
+                  { label: "Valid Timestamps", value: dataQuality.withTimestamp, color: dataQuality.withTimestamp === dataQuality.total ? "text-green-400" : "text-amber-400" },
+                  { label: "Missing Timestamps", value: dataQuality.missingTimestamp, color: dataQuality.missingTimestamp === 0 ? "text-zinc-600" : "text-amber-400" },
+                  { label: "Other Status", value: dataQuality.otherCount, color: dataQuality.otherCount === 0 ? "text-zinc-600" : "text-red-400" },
+                  { label: "Duplicate Keys", value: dataQuality.duplicateKeys, color: dataQuality.duplicateKeys === 0 ? "text-zinc-600" : "text-amber-400" },
+                  { label: "Date Coverage", value: callsByDay.length > 0 ? `${callsByDay.length}d` : "—", color: "text-zinc-400" },
+                ].map(({ label, value, color }) => (
+                  <div key={label} className="bg-zinc-900 border border-zinc-800 p-3">
+                    <p className="text-[9px] uppercase tracking-widest text-zinc-600 mb-1">{label}</p>
+                    <p className={`text-lg font-mono font-bold ${color}`}>{value}</p>
+                  </div>
+                ))}
+                {dataQuality.lastMigration && (
+                  <div className="col-span-full mt-1">
+                    <p className="text-[9px] text-zinc-700 font-mono">Last rebuild: {new Date(dataQuality.lastMigration).toLocaleString()}</p>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
         )}
 
         {/* ── DEV TOOLS ── */}
@@ -854,24 +1009,31 @@ export default function Dashboard() {
           </button>
           {showDevTools && (
             <div className="mt-3 border border-zinc-800 bg-zinc-900/40 p-4 space-y-3">
+              {/* Rebuild / Recalculate */}
               <div>
-                <p className="text-[10px] text-zinc-600 mb-2">Re-derive status from notes field for all stored calls. Fixes records imported before Info-first resolution.</p>
-                <div className="flex items-center gap-3 flex-wrap">
+                <p className="text-[10px] text-zinc-600 mb-1">Re-normalize statuses · Recalculate timestamps · Rebuild dedupe keys · Refresh charts.</p>
+                <div className="flex items-start gap-3 flex-wrap">
                   <Btn onClick={() => {
-                    const result = migrateNormalizeStatuses();
+                    const result = migrateAll();
                     setCalls(loadCalls());
                     setMigrateResult(result);
-                  }} variant="ghost" small>Re-normalize Stored Calls</Btn>
+                  }} variant="ghost" small>Rebuild / Recalculate Data</Btn>
                   {migrateResult && (
-                    <span className="text-[10px] font-mono text-zinc-500">
-                      Fixed <span className="text-green-400 font-bold">{migrateResult.fixed}</span> call{migrateResult.fixed !== 1 ? "s" : ""}.
-                      Other: <span className="text-red-400">{migrateResult.before["Other"] ?? 0}</span>
-                      {" → "}
-                      <span className={migrateResult.after["Other"] === 0 ? "text-green-400" : "text-amber-400"}>{migrateResult.after["Other"] ?? 0}</span>
-                    </span>
+                    <div className="text-[10px] font-mono text-zinc-500 leading-relaxed">
+                      <span>Rebuilt <span className="text-green-400 font-bold">{migrateResult.fixed + migrateResult.timestampFixed}</span> call{migrateResult.fixed + migrateResult.timestampFixed !== 1 ? "s" : ""}.</span>
+                      <span className="ml-3">Status fixes: <span className="text-green-400">{migrateResult.fixed}</span></span>
+                      <span className="ml-3">Timestamp fixes: <span className="text-blue-400">{migrateResult.timestampFixed}</span></span>
+                      <span className="ml-3">Timestamp errors: <span className={migrateResult.timestampErrors === 0 ? "text-zinc-600" : "text-amber-400"}>{migrateResult.timestampErrors}</span></span>
+                      <span className="ml-3">
+                        Other: <span className="text-red-400">{migrateResult.before["Other"] ?? 0}</span>
+                        {" → "}
+                        <span className={migrateResult.after["Other"] === 0 ? "text-green-400" : "text-amber-400"}>{migrateResult.after["Other"] ?? 0}</span>
+                      </span>
+                    </div>
                   )}
                 </div>
               </div>
+              {/* Demo data */}
               <div className="border-t border-zinc-800 pt-3">
                 <p className="text-[10px] text-zinc-600 mb-2">Load sample data for testing. Will not appear by default on first load.</p>
                 <Btn onClick={handleLoadDemo} variant="ghost" small>Load Demo Data</Btn>
@@ -889,7 +1051,7 @@ export default function Dashboard() {
       {/* ── REPORT MODAL ── */}
       {showReport && (
         <Suspense fallback={null}>
-          <ReportModal calls={calls} lastImport={lastImport} onClose={() => setShowReport(false)} />
+          <ReportModal calls={calls} onClose={() => setShowReport(false)} />
         </Suspense>
       )}
     </div>

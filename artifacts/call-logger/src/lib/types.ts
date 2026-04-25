@@ -31,6 +31,11 @@ export interface StoredCall {
   source: CallSource;
   dedupeKey: string;
   importedAt: string;
+  // Canonical timestamp fields — populated by parsers and backfilled by migration
+  startedAtISO: string;   // ISO 8601 UTC (e.g. "2026-04-25T10:43:41.000Z") or ""
+  dateKey: string;        // Local YYYY-MM-DD (e.g. "2026-04-25") or ""
+  hourKey: number;        // Local 0-23 hour
+  rawTime?: string;       // Raw time value from source (unix seconds or date string) for re-parsing
 }
 
 export interface ImportResult {
@@ -41,6 +46,8 @@ export interface ImportResult {
   total: number;
   format: string;
   timestamp: string;
+  parseErrors?: number;
+  timestampErrors?: number;
 }
 
 export interface ParsedRow {
@@ -51,4 +58,10 @@ export interface ParsedRow {
   durationSeconds: number;
   status: CallStatus;
   notes: string;
+  // Canonical timestamp fields
+  startedAtISO: string;
+  dateKey: string;
+  hourKey: number;
+  rawTime?: string;
+  parseError?: string;
 }

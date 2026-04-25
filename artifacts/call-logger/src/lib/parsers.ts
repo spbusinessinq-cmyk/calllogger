@@ -49,12 +49,11 @@ export function normalizeStoredStatus(currentStatus: CallStatus, notes: string):
 }
 
 // MicroSIP two-field resolution:
-// 1. Inspect Info for descriptive keywords (highest priority — this is what MicroSIP fills in)
+// 1. Inspect Info for descriptive keywords (highest priority)
 // 2. Fall back to Type code only if Info gives no signal
 export function resolveMicroSIPStatus(info: string, typeRaw: string): CallStatus {
   const i = info.trim().toLowerCase();
 
-  // Info-field rules (covers the vast majority of real MicroSIP exports)
   if (i.includes("answered elsewhere")) return "Answered";
   if (i.includes("call ended")) return "Call Ended";
   if (i.includes("cancelled") || i.includes("canceled")) return "Canceled";
@@ -63,19 +62,16 @@ export function resolveMicroSIPStatus(info: string, typeRaw: string): CallStatus
   if (i.includes("no answer")) return "Missed";
   if (i.includes("voicemail") || i.includes("voice mail")) return "Voicemail";
 
-  // Type-field fallback (used when Info is blank or unrecognised)
   const t = typeRaw.trim().toLowerCase();
   if (t === "in" || t === "answered") return "Answered";
   if (t === "out" || t === "outgoing") return "Outgoing";
   if (t === "miss" || t === "missed") return "Missed";
   if (t === "canceled" || t === "cancelled") return "Canceled";
   if (t === "voicemail") return "Voicemail";
-  // MicroSIP INI numeric type codes
   if (t === "0") return "Outgoing";
   if (t === "1") return "Answered";
   if (t === "2") return "Missed";
   if (t === "3") return "Other";
-  // "else" and anything else → Other
   return "Other";
 }
 
@@ -93,19 +89,114 @@ function parseDurationToSeconds(raw: string): number {
   return total;
 }
 
-function unixToDatetime(unix: string | number): { date: string; time: string; hour: number } {
-  const ts = typeof unix === "string" ? parseInt(unix, 10) : unix;
-  if (isNaN(ts) || ts === 0) return { date: "", time: "", hour: 0 };
-  const d = new Date(ts * 1000);
-  const date = d.toISOString().slice(0, 10);
-  const time = d.toTimeString().slice(0, 5);
-  const hour = d.getHours();
-  return { date, time, hour };
+// Format a local date as YYYY-MM-DD using LOCAL date methods (not UTC).
+function localDateKey(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
 }
 
-function parseDatetime(date: string, time: string): { date: string; time: string; hour: number } {
-  const hour = time ? parseInt(time.split(":")[0], 10) : 0;
-  return { date: date.trim(), time: time.trim(), hour };
+// Format local time as HH:MM
+function localTimeStr(d: Date): string {
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+// Convert Unix timestamp (seconds) to canonical fields using LOCAL time.
+// Critical: toISOString() returns UTC date which may be a different calendar day.
+// Always use getFullYear/getMonth/getDate for dateKey.
+export function unixToDatetime(unix: string | number): {
+  date: string; time: string; hour: number;
+  startedAtISO: string; dateKey: string; hourKey: number;
+} {
+  const ts = typeof unix === "string" ? parseInt(unix, 10) : unix;
+  if (isNaN(ts) || ts <= 0) return { date: "", time: "", hour: 0, startedAtISO: "", dateKey: "", hourKey: 0 };
+  const d = new Date(ts * 1000);
+  const dateKey = localDateKey(d);
+  const time = localTimeStr(d);
+  const hourKey = d.getHours();
+  return { date: dateKey, time, hour: hourKey, startedAtISO: d.toISOString(), dateKey, hourKey };
+}
+
+// Robust Standard CSV date+time parsing.
+// Accepts many formats: YYYY-MM-DD, M/D/YYYY, "Apr 25 2026" + HH:MM, HH:MM:SS, h:MM PM
+export function parseDatetime(dateRaw: string, timeRaw: string): {
+  date: string; time: string; hour: number;
+  startedAtISO: string; dateKey: string; hourKey: number;
+} {
+  const dateStr = dateRaw.trim();
+  const timeStr = timeRaw.trim();
+
+  // Normalize date: convert M/D/YYYY → YYYY-MM-DD
+  function normalizeDate(s: string): string {
+    // M/D/YYYY or MM/DD/YYYY
+    const slashMatch = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+    if (slashMatch) {
+      return `${slashMatch[3]}-${slashMatch[1].padStart(2, "0")}-${slashMatch[2].padStart(2, "0")}`;
+    }
+    // Already YYYY-MM-DD
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+    // "Apr 25 2026" or "April 25, 2026"
+    try {
+      const d = new Date(s);
+      if (!isNaN(d.getTime())) return localDateKey(d);
+    } catch { /* ignore */ }
+    return s;
+  }
+
+  // Normalize time: convert 12-hour to 24-hour
+  function normalizeTime(s: string): string {
+    const ampm = s.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)$/i);
+    if (ampm) {
+      let h = parseInt(ampm[1], 10);
+      const min = ampm[2];
+      const meridiem = ampm[4].toUpperCase();
+      if (meridiem === "AM" && h === 12) h = 0;
+      if (meridiem === "PM" && h !== 12) h += 12;
+      return `${String(h).padStart(2, "0")}:${min}`;
+    }
+    // Already HH:MM or HH:MM:SS
+    if (/^\d{2}:\d{2}/.test(s)) return s.slice(0, 5);
+    return s;
+  }
+
+  const normalDate = normalizeDate(dateStr);
+  const normalTime = normalizeTime(timeStr);
+
+  if (normalDate && normalTime) {
+    const combined = `${normalDate}T${normalTime}`;
+    const d = new Date(combined);
+    if (!isNaN(d.getTime())) {
+      return {
+        date: localDateKey(d),
+        time: localTimeStr(d),
+        hour: d.getHours(),
+        startedAtISO: d.toISOString(),
+        dateKey: localDateKey(d),
+        hourKey: d.getHours(),
+      };
+    }
+  }
+
+  if (normalDate) {
+    const d = new Date(normalDate + "T12:00:00");
+    if (!isNaN(d.getTime())) {
+      const hour = normalTime ? parseInt(normalTime.split(":")[0], 10) : 0;
+      const safeHour = isNaN(hour) ? 0 : hour;
+      return {
+        date: localDateKey(d),
+        time: normalTime || "",
+        hour: safeHour,
+        startedAtISO: "",
+        dateKey: localDateKey(d),
+        hourKey: safeHour,
+      };
+    }
+  }
+
+  // Fallback: raw strings, no ISO
+  const hour = normalTime ? parseInt(normalTime.split(":")[0], 10) : 0;
+  return { date: dateStr, time: timeStr, hour: isNaN(hour) ? 0 : hour, startedAtISO: "", dateKey: "", hourKey: isNaN(hour) ? 0 : hour };
 }
 
 // ──────────────────────────────────────────────
@@ -139,7 +230,7 @@ export function toStoredCall(row: ParsedRow, source: CallSource): StoredCall {
     maskedNumber: maskPhone(phone),
     date: row.date,
     time: row.time,
-    hour: row.time ? parseInt(row.time.split(":")[0], 10) : 0,
+    hour: row.hourKey ?? (row.time ? parseInt(row.time.split(":")[0], 10) : 0),
     durationSeconds: row.durationSeconds,
     duration: formatDuration(row.durationSeconds),
     status: row.status,
@@ -147,6 +238,10 @@ export function toStoredCall(row: ParsedRow, source: CallSource): StoredCall {
     source,
     dedupeKey,
     importedAt: new Date().toISOString(),
+    startedAtISO: row.startedAtISO ?? "",
+    dateKey: row.dateKey || row.date,
+    hourKey: row.hourKey ?? (row.time ? parseInt(row.time.split(":")[0], 10) : 0),
+    rawTime: row.rawTime,
   };
 }
 
@@ -180,7 +275,6 @@ export function detectFormat(text: string): DetectedFormat {
   ) {
     return "standard-csv";
   }
-  // Try to detect callcentric
   if (
     firstLine.includes("direction") ||
     firstLine.includes("callerid") ||
@@ -188,7 +282,6 @@ export function detectFormat(text: string): DetectedFormat {
   ) {
     return "callcentric-csv";
   }
-  // Generic CSV fallback
   if (trimmed.includes(",")) {
     return "standard-csv";
   }
@@ -227,7 +320,7 @@ export function parseText(text: string): ParseResult {
   }
 }
 
-// Standard CSV
+// Standard CSV: Name,Number,Date,Time,Duration,Status,Notes
 function parseStandardCSV(text: string): ParseResult {
   const result = Papa.parse<Record<string, string>>(text.trim(), { header: true, skipEmptyLines: true });
   const rows: ParsedRow[] = [];
@@ -238,13 +331,22 @@ function parseStandardCSV(text: string): ParseResult {
     try {
       const name = r["Name"] ?? r["name"] ?? r["CallerName"] ?? r["caller_name"] ?? "";
       const number = r["Number"] ?? r["number"] ?? r["Phone"] ?? r["phone"] ?? "";
-      const date = r["Date"] ?? r["date"] ?? "";
-      const time = r["Time"] ?? r["time"] ?? "";
+      const dateRaw = r["Date"] ?? r["date"] ?? "";
+      const timeRaw = r["Time"] ?? r["time"] ?? "";
       const durationRaw = r["Duration"] ?? r["duration"] ?? "0";
       const status = normalizeStatus(r["Status"] ?? r["status"] ?? "Other");
       const notes = r["Notes"] ?? r["notes"] ?? r["Info"] ?? r["info"] ?? "";
 
-      rows.push({ callerName: name, phoneNumber: number, date, time, durationSeconds: parseDurationToSeconds(durationRaw), status, notes });
+      const ts = parseDatetime(dateRaw, timeRaw);
+
+      rows.push({
+        callerName: name, phoneNumber: number,
+        date: ts.date, time: ts.time,
+        durationSeconds: parseDurationToSeconds(durationRaw),
+        status, notes,
+        startedAtISO: ts.startedAtISO, dateKey: ts.dateKey, hourKey: ts.hourKey,
+        rawTime: dateRaw ? `${dateRaw} ${timeRaw}`.trim() : undefined,
+      });
     } catch (e) {
       errors.push(`Row ${i + 2}: ${String(e)}`);
     }
@@ -268,11 +370,21 @@ function parseMicroSIPCSV(text: string): ParseResult {
       const durationRaw = r["Duration"] ?? r["duration"] ?? "0";
       const info = r["Info"] ?? r["info"] ?? "";
 
-      const { date, time } = unixToDatetime(timeRaw);
+      const ts = unixToDatetime(timeRaw);
       const status = resolveMicroSIPStatus(info, typeRaw);
       const durationSeconds = parseDurationToSeconds(durationRaw);
 
-      rows.push({ callerName: name, phoneNumber: number, date, time, durationSeconds, status, notes: info });
+      if (!ts.dateKey) {
+        errors.push(`Row ${i + 2}: Could not parse unix timestamp "${timeRaw}"`);
+      }
+
+      rows.push({
+        callerName: name, phoneNumber: number,
+        date: ts.date, time: ts.time,
+        durationSeconds, status, notes: info,
+        startedAtISO: ts.startedAtISO, dateKey: ts.dateKey, hourKey: ts.hourKey,
+        rawTime: timeRaw,
+      });
     } catch (e) {
       errors.push(`Row ${i + 2}: ${String(e)}`);
     }
@@ -298,11 +410,21 @@ function parseMicroSIPINI(text: string): ParseResult {
 
       const [number, name, typeRaw, unixTime, durationRaw, ...infoParts] = parts;
       const info = infoParts.join(";");
-      const { date, time } = unixToDatetime(unixTime);
+      const ts = unixToDatetime(unixTime);
       const status = resolveMicroSIPStatus(info, typeRaw);
       const durationSeconds = parseDurationToSeconds(durationRaw);
 
-      rows.push({ callerName: name ?? "", phoneNumber: number ?? "", date, time, durationSeconds, status, notes: info });
+      if (!ts.dateKey) {
+        errors.push(`INI line: Could not parse unix timestamp "${unixTime}"`);
+      }
+
+      rows.push({
+        callerName: name ?? "", phoneNumber: number ?? "",
+        date: ts.date, time: ts.time,
+        durationSeconds, status, notes: info,
+        startedAtISO: ts.startedAtISO, dateKey: ts.dateKey, hourKey: ts.hourKey,
+        rawTime: unixTime,
+      });
     } catch (e) {
       errors.push(`INI line "${trimmed.slice(0, 40)}": ${String(e)}`);
     }
@@ -310,7 +432,7 @@ function parseMicroSIPINI(text: string): ParseResult {
   return { rows, errors, format: "microsip-ini" };
 }
 
-// MicroSIP XML
+// MicroSIP XML: <call type="" name="" number="" time="" duration="" info="" />
 function parseMicroSIPXML(text: string): ParseResult {
   const rows: ParsedRow[] = [];
   const errors: string[] = [];
@@ -334,11 +456,21 @@ function parseMicroSIPXML(text: string): ParseResult {
         const durationRaw = el.getAttribute("duration") ?? "0";
         const info = el.getAttribute("info") ?? "";
 
-        const { date, time } = unixToDatetime(unixTime);
+        const ts = unixToDatetime(unixTime);
         const status = resolveMicroSIPStatus(info, typeRaw);
         const durationSeconds = parseDurationToSeconds(durationRaw);
 
-        rows.push({ callerName: name, phoneNumber: number, date, time, durationSeconds, status, notes: info });
+        if (!ts.dateKey) {
+          errors.push(`XML call ${i}: Could not parse unix timestamp "${unixTime}"`);
+        }
+
+        rows.push({
+          callerName: name, phoneNumber: number,
+          date: ts.date, time: ts.time,
+          durationSeconds, status, notes: info,
+          startedAtISO: ts.startedAtISO, dateKey: ts.dateKey, hourKey: ts.hourKey,
+          rawTime: unixTime,
+        });
       } catch (e) {
         errors.push(`XML call element ${i}: ${String(e)}`);
       }
@@ -362,7 +494,7 @@ function parseCallcentricCSV(text: string): ParseResult {
 
   const nameKey = findKey(["Name", "CallerName", "Caller", "CallerID", "Caller ID"]);
   const numberKey = findKey(["Number", "Phone", "From", "To", "DID", "Extension"]);
-  const dateKey = findKey(["Date"]);
+  const dateKey_ = findKey(["Date"]);
   const timeKey = findKey(["Time"]);
   const durationKey = findKey(["Duration", "Length", "Seconds"]);
   const statusKey = findKey(["Status", "Result", "Direction", "Type", "Info"]);
@@ -373,13 +505,22 @@ function parseCallcentricCSV(text: string): ParseResult {
     try {
       const name = nameKey ? (r[nameKey] ?? "") : "";
       const number = numberKey ? (r[numberKey] ?? "") : "";
-      const date = dateKey ? (r[dateKey] ?? "") : "";
-      const time = timeKey ? (r[timeKey] ?? "") : "";
+      const dateRaw = dateKey_ ? (r[dateKey_] ?? "") : "";
+      const timeRaw = timeKey ? (r[timeKey] ?? "") : "";
       const durationRaw = durationKey ? (r[durationKey] ?? "0") : "0";
       const status = normalizeStatus(statusKey ? (r[statusKey] ?? "Other") : "Other");
       const notes = notesKey ? (r[notesKey] ?? "") : "";
 
-      rows.push({ callerName: name, phoneNumber: number, date, time, durationSeconds: parseDurationToSeconds(durationRaw), status, notes });
+      const ts = parseDatetime(dateRaw, timeRaw);
+
+      rows.push({
+        callerName: name, phoneNumber: number,
+        date: ts.date, time: ts.time,
+        durationSeconds: parseDurationToSeconds(durationRaw),
+        status, notes,
+        startedAtISO: ts.startedAtISO, dateKey: ts.dateKey, hourKey: ts.hourKey,
+        rawTime: dateRaw ? `${dateRaw} ${timeRaw}`.trim() : undefined,
+      });
     } catch (e) {
       errors.push(`Row ${i + 2}: ${String(e)}`);
     }
