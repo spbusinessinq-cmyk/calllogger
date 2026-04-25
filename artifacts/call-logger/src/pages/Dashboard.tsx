@@ -7,9 +7,11 @@ import { type StoredCall, type CallStatus, type ImportResult } from "@/lib/types
 import {
   loadCalls, saveCalls, clearCalls, loadLastImport, saveLastImport,
   mergeImport, migrateAll, loadLastMigrationTime,
-  type MigrateResult,
+  loadSchemaVersion, runSchemaRepair,
+  DATA_SCHEMA_VERSION,
+  type MigrateResult, type SchemaRepairResult,
 } from "@/lib/storage";
-import { getCallDate, getDateKey, getHourKey, repairTimestamps } from "@/lib/callDate";
+import { getCallDate, getDateKey, getHourKey } from "@/lib/callDate";
 import { parseText, toStoredCall, FORMAT_LABELS, type DetectedFormat } from "@/lib/parsers";
 import { generateMasterCSV } from "@/lib/report";
 import { formatDuration, formatTimestamp } from "@/lib/utils";
@@ -113,31 +115,36 @@ export default function Dashboard() {
 
   useEffect(() => { saveCalls(calls); }, [calls]);
 
-  // Guard: run timestamp repair exactly once per session
+  // Guard: run schema repair exactly once per page load
   const repairDone = useRef(false);
 
-  // Startup: repair timestamps then run status migration
+  // ── Production repair state
+  const [schemaVersion, setSchemaVersion] = useState<number>(() => loadSchemaVersion());
+  const [schemaRepairResult, setSchemaRepairResult] = useState<SchemaRepairResult | null>(null);
+  const [repairMsg, setRepairMsg] = useState<string | null>(null);
+  const [migrationRan, setMigrationRan] = useState(false);
+
+  // Startup: always repair if schema version is behind
   useEffect(() => {
     if (repairDone.current) return;
     repairDone.current = true;
 
-    // 1. Re-derive startedAtISO/dateKey/hourKey for every stored call using getCallDate
-    const raw = loadCalls();
-    const repaired = repairTimestamps(raw);
-    const anyRepaired = repaired.some((c, i) =>
-      c.startedAtISO !== raw[i].startedAtISO ||
-      c.dateKey !== raw[i].dateKey ||
-      c.hourKey !== raw[i].hourKey
-    );
-    if (anyRepaired) saveCalls(repaired);
+    const storedVersion = loadSchemaVersion();
+    const needsRepair = storedVersion < DATA_SCHEMA_VERSION;
 
-    // 2. Re-normalize statuses / backfill via storage migration
-    const result = migrateAll();
-    if (anyRepaired || result.fixed > 0 || result.timestampFixed > 0) {
+    if (needsRepair) {
+      // Full schema repair: re-derives timestamps + normalizes statuses
+      const result = runSchemaRepair();
+      setSchemaRepairResult(result);
+      setSchemaVersion(DATA_SCHEMA_VERSION);
       setCalls(loadCalls());
+      setMigrationRan(true);
+      console.log("[schema repair] ran", result);
+    } else {
+      setMigrationRan(false);
     }
 
-    // Debug log for one sample call
+    // Debug log for one sample call regardless
     const sample = loadCalls()[0];
     if (sample) {
       console.log("sample call for chart parsing", sample, getCallDate(sample), getDateKey(sample), getHourKey(sample));
@@ -183,6 +190,20 @@ export default function Dashboard() {
 
   // ── Data quality panel
   const [showDataQuality, setShowDataQuality] = useState(false);
+
+  // ── Auto-repair if charts are empty despite calls existing
+  const autoRepairDone = useRef(false);
+  useEffect(() => {
+    if (autoRepairDone.current || calls.length === 0) return;
+    const hasValidTs = calls.some((c) => getCallDate(c) !== null);
+    if (!hasValidTs && !autoRepairDone.current) {
+      autoRepairDone.current = true;
+      const result = runSchemaRepair();
+      setSchemaRepairResult(result);
+      setCalls(loadCalls());
+      console.log("[auto-repair] triggered due to empty timestamps", result);
+    }
+  }, [calls]);
 
   // ──────────────────────────────────────────────
   // Derived data
@@ -768,15 +789,62 @@ export default function Dashboard() {
               </div>
             </Sec>
 
-            {/* Timestamp quality debug line */}
-            <div className="flex items-center gap-4 px-1 py-1 border border-zinc-800/60 bg-zinc-900/30">
-              <span className="text-[9px] font-mono text-zinc-600 uppercase tracking-widest">
-                Timestamp valid: <span className={tsQuality.valid === tsQuality.total ? "text-green-600" : "text-amber-500"}>{tsQuality.valid}</span>
-                {" / Total: "}<span className="text-zinc-500">{tsQuality.total}</span>
-                {tsQuality.unknown > 0 && <span className="text-amber-500 ml-3">Unknown: {tsQuality.unknown}</span>}
-                {tsQuality.valid === tsQuality.total && tsQuality.total > 0 && <span className="text-green-700 ml-3">✓ all timestamps resolvable</span>}
-              </span>
-            </div>
+            {/* Production debug strip */}
+            {hasData && (
+              <div className="border border-zinc-800/60 bg-zinc-900/40 px-3 py-2 space-y-1.5">
+                <div className="flex flex-wrap items-center gap-x-5 gap-y-1">
+                  <span className="text-[9px] font-mono text-zinc-600 uppercase tracking-widest">
+                    Timestamp valid: <span className={tsQuality.valid === tsQuality.total ? "text-green-600" : "text-amber-500"}>{tsQuality.valid}</span>
+                    {" / Total: "}<span className="text-zinc-500">{tsQuality.total}</span>
+                    {tsQuality.unknown > 0 && <span className="ml-2 text-amber-500">Invalid: {tsQuality.unknown}</span>}
+                    {tsQuality.valid === tsQuality.total && tsQuality.total > 0 && <span className="ml-2 text-green-700">✓ all resolvable</span>}
+                  </span>
+                  <span className="text-[9px] font-mono text-zinc-700">
+                    Schema: <span className="text-zinc-500">{schemaVersion}</span> / <span className="text-zinc-600">{DATA_SCHEMA_VERSION}</span>
+                    {schemaVersion < DATA_SCHEMA_VERSION && <span className="text-amber-600 ml-1">↑ outdated</span>}
+                    {schemaVersion >= DATA_SCHEMA_VERSION && <span className="text-green-800 ml-1">✓</span>}
+                  </span>
+                  <span className="text-[9px] font-mono text-zinc-700">
+                    Migration: <span className={migrationRan ? "text-blue-600" : "text-zinc-700"}>{migrationRan ? "ran" : "skipped"}</span>
+                  </span>
+                  {(() => {
+                    const first = calls[0];
+                    if (!first) return null;
+                    const rawVal = (first as Record<string, unknown>).rawTime ?? first.time ?? "—";
+                    const parsedHour = getHourKey(first);
+                    return (
+                      <span className="text-[9px] font-mono text-zinc-700">
+                        First call raw time: <span className="text-zinc-500">{String(rawVal).slice(0, 20)}</span>
+                        {" · "}parsed hour: <span className={parsedHour !== null ? "text-green-700" : "text-red-700"}>{parsedHour !== null ? parsedHour : "invalid"}</span>
+                      </span>
+                    );
+                  })()}
+                </div>
+                {/* Manual repair button + result */}
+                <div className="flex items-center gap-3 flex-wrap">
+                  <button
+                    onClick={() => {
+                      const result = runSchemaRepair();
+                      setSchemaRepairResult(result);
+                      setSchemaVersion(DATA_SCHEMA_VERSION);
+                      setCalls(loadCalls());
+                      setRepairMsg(`Repaired ${result.timestampRepaired} calls. Valid timestamps: ${calls.filter((c) => getCallDate(c) !== null).length + result.timestampRepaired} / ${result.total}.`);
+                      setTimeout(() => setRepairMsg(null), 6000);
+                    }}
+                    className="text-[9px] uppercase tracking-widest font-mono px-3 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-400 border border-zinc-700 transition-colors">
+                    Repair Production Timestamps
+                  </button>
+                  {repairMsg && (
+                    <span className="text-[9px] font-mono text-green-500">{repairMsg}</span>
+                  )}
+                  {schemaRepairResult && !repairMsg && (
+                    <span className="text-[9px] font-mono text-zinc-700">
+                      Last repair: ts={schemaRepairResult.timestampRepaired} status={schemaRepairResult.statusFixed} total={schemaRepairResult.total}
+                    </span>
+                  )}
+                </div>
+              </div>
+            )}
 
             <Sec title="Status & Callers">
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">

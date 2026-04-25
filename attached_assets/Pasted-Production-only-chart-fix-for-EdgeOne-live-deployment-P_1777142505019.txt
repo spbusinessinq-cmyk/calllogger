@@ -1,0 +1,142 @@
+Production-only chart fix for EdgeOne live deployment.
+
+Problem:
+In Replit/dev, Calls by Hour and Calls by Day bars render correctly.
+In the live EdgeOne deployment, metrics show imported calls exist, status/repeat/longest/follow-up panels work, but Calls by Hour and Calls by Day remain empty/zero.
+
+This means production is either:
+1. Reading old localStorage data that was saved before timestamp fields existed.
+2. Using a different stored schema than dev.
+3. Not running the timestamp migration correctly in production.
+4. Chart code is relying on dateKey/hourKey that are missing in live localStorage.
+5. Time parsing works during import but not for already-stored production records.
+
+Do not redesign the app. Fix production timestamp/chart hydration.
+
+Requirements:
+
+1. Add production-safe localStorage migration versioning.
+
+Use a constant:
+const DATA_SCHEMA_VERSION = 2
+
+Store:
+localStorage.setItem("ps_call_logger_schema_version", "2")
+
+On app startup:
+- Load all stored calls.
+- Always run timestamp repair if schema version is missing or less than 2.
+- For every call, recalculate:
+  startedAtISO
+  dateKey
+  hourKey
+  timestampValid
+- Save repaired calls back to localStorage.
+- Then update React state from the repaired calls.
+- Set schema version to 2 only after successful repair.
+
+2. Make chart grouping never depend only on stored dateKey/hourKey.
+
+For Calls by Hour:
+- For every call, call getCallDate(call) live.
+- If valid, use d.getHours().
+- If invalid, skip and count as timestamp error.
+- Do not use call.hourKey unless getCallDate fails and hourKey is valid.
+
+For Calls by Day:
+- For every call, call getCallDate(call) live.
+- If valid, format local YYYY-MM-DD.
+- If invalid, skip and count as timestamp error.
+- Do not rely only on call.dateKey.
+
+3. Fix getCallDate for production data.
+
+getCallDate(call) must try all of these field names because live data may have older shapes:
+
+- call.startedAtISO
+- call.startedAt
+- call.timestamp
+- call.rawTime
+- call.raw_time
+- call.microSipTime
+- call.timeUnix
+- call.time_unix
+- call.unixTime
+- call.unix_time
+- call.Time
+- call.time
+- call.date + " " + call.time
+- call.Date + " " + call.Time
+- call.dateKey + " " + call.time
+
+Rules:
+- If value is a number or numeric string greater than 1000000000, treat as Unix seconds and return new Date(value * 1000).
+- If value is a number or numeric string greater than 1000000000000, treat as Unix milliseconds and return new Date(value).
+- If value is a normal date string, use new Date(value).
+- Validate with !isNaN(date.getTime()).
+- Never throw.
+
+4. Add a visible production debug strip under the Call Volume section.
+
+Show:
+Timestamp valid: X / Total: Y
+Timestamp invalid: Z
+Schema version: current value
+Migration: ran / skipped
+First call parsed hour: [hour or invalid]
+First call raw time: [raw value]
+
+This can be small and dim, but visible until we confirm production works.
+
+5. Add a manual repair button near the debug strip:
+Repair Production Timestamps
+
+When clicked:
+- runs the same migration on current stored calls
+- saves back to localStorage
+- updates state
+- recalculates charts
+- shows:
+“Repaired X calls. Valid timestamps: Y / X.”
+
+6. Add a fallback repair if charts are empty but calls exist.
+
+If totalCalls > 0 and callsByHour total == 0:
+- automatically run timestamp repair once
+- if still 0, show a clear warning:
+“Calls exist, but no valid timestamps were found. Check import time field.”
+
+Same for Calls by Day.
+
+7. Add an import-time normalization guarantee.
+
+When importing MicroSIP CSV:
+- raw Time must be preserved as rawTime
+- startedAtISO must be calculated immediately
+- dateKey must be calculated immediately
+- hourKey must be calculated immediately
+- timestampValid must be true if Unix time parses
+
+8. Add a “Clear Stored Data” button in Developer / Tools.
+
+This is for production debugging only.
+Requires confirmation typing CLEAR.
+After clearing, reload with an empty dashboard.
+
+9. Acceptance test on EdgeOne live:
+- Import MicroSIP CSV.
+- Refresh page.
+- Metrics still show calls.
+- Timestamp valid should show 59 / 59 or close.
+- Calls by Hour has nonzero bars.
+- Calls by Day has nonzero bars.
+- Re-import same file skips duplicates.
+- Refresh again and charts remain working.
+
+10. After fixing, run:
+npm run build
+
+Do not change styling except the small debug/repair strip.
+Do not add backend.
+Do not add auth.
+Do not remove existing import/dedupe/report features.
