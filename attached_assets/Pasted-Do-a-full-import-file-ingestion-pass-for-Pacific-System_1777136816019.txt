@@ -1,0 +1,391 @@
+Do a full import/file-ingestion pass for Pacific Systems Call Logger.
+
+Core goal:
+I need to be able to import my full MicroSIP or Callcentric call log every day without creating duplicates.
+
+The app must support:
+1. Paste CSV
+2. Drag-and-drop file upload
+3. Click-to-upload file picker
+4. Deduped master call database
+5. Export deduped master CSV
+
+Keep the app simple:
+- Log calls
+- Import calls
+- Visualize calls
+- Export summary/master CSV
+
+No login.
+No fake live features.
+No complicated integrations.
+No database beyond local JSON storage if backend exists, or localStorage/IndexedDB if frontend-only.
+
+━━━━━━━━━━━━━━━━━━━━
+IMPORT SOURCES
+━━━━━━━━━━━━━━━━━━━━
+
+Support these import formats:
+
+FORMAT A — Standard CSV:
+Name,Number,Date,Time,Duration,Status,Notes
+
+FORMAT B — MicroSIP CSV Export:
+Type,Name,Number,Time,Duration,Info
+
+MicroSIP details:
+- Type can be: out, in, miss, else
+- Time is Unix timestamp seconds
+- Duration is seconds
+- Info is call status/detail
+
+Map MicroSIP Type:
+- out = Outgoing
+- in = Answered
+- miss = Missed
+- else = Other / Answered Elsewhere
+
+FORMAT C — MicroSIP INI call lines:
+[Calls]
+0=number;name;type;unix_time;duration_seconds;info
+1=number;name;type;unix_time;duration_seconds;info
+
+INI type mapping:
+- 0 = Outgoing
+- 1 = Answered
+- 2 = Missed
+- 3 = Other / Answered Elsewhere
+
+Ignore:
+- [Calls]
+- [Settings]
+- callsLastKey
+- blank lines
+- unrelated settings
+
+FORMAT D — Callcentric-style CSV / copied report:
+Try to detect common columns:
+Name, Number, Date, Time, Duration, Info, Status, Direction
+or similar.
+
+If the parser cannot detect it, show a clear error explaining the expected columns.
+
+━━━━━━━━━━━━━━━━━━━━
+FILE IMPORT UI
+━━━━━━━━━━━━━━━━━━━━
+
+Add a clear import section:
+
+Title:
+IMPORT CALL LOG
+
+Subtitle:
+Paste, drag, or upload your MicroSIP / Callcentric export.
+
+Add:
+1. Drag-and-drop zone
+Text:
+“Drop CSV / TXT / INI / XML call log here”
+
+2. File picker button:
+“Choose Call Log File”
+
+Accepted file types:
+.csv, .txt, .ini, .xml
+
+3. Paste box:
+“Or paste call log text here”
+
+4. Buttons:
+- Import Log
+- Use Sample Data
+- Clear Import Box
+
+5. Import mode display:
+Auto-detected format:
+- Standard CSV
+- MicroSIP CSV
+- MicroSIP INI
+- Callcentric CSV
+- Unknown
+
+6. Import result message:
+Imported: X new calls
+Skipped duplicates: Y
+Errors: Z
+Total stored calls: Z
+
+7. Show preview before import:
+After file/paste load, show first 5 parsed rows:
+Caller | Masked Number | Date | Time | Duration | Status
+
+Then button:
+Confirm Import
+
+This prevents bad imports.
+
+━━━━━━━━━━━━━━━━━━━━
+DEDUPLICATION
+━━━━━━━━━━━━━━━━━━━━
+
+This is critical.
+
+MicroSIP may export the full call history every time.
+Callcentric may export overlapping logs.
+
+The app must never duplicate the same call.
+
+For every call, generate a stable dedupeKey.
+
+Use:
+- normalized phone number
+- normalized caller name
+- startedAt/date+time
+- durationSeconds
+- normalized status/type
+- notes/info
+
+Example:
+`${number}|${name}|${startedAt}|${durationSeconds}|${status}|${notes}`
+
+Normalize:
+- strip spaces, dashes, parentheses from phone numbers
+- lowercase caller name
+- trim all fields
+- convert dates/times to consistent ISO if possible
+- convert duration to seconds
+
+On import:
+- Load existing calls
+- Generate dedupeKey for each imported row
+- If dedupeKey exists, skip it
+- If dedupeKey does not exist, add it
+
+If same number/name/time/status exists but notes differ slightly:
+Still treat as duplicate if timestamp + number + duration + status match.
+
+Add import result:
+“Safe Import Enabled — duplicate calls were skipped.”
+
+Test case:
+If I import the same full MicroSIP CSV twice:
+First import: Imported X, skipped 0
+Second import: Imported 0, skipped X
+
+━━━━━━━━━━━━━━━━━━━━
+MASTER CALL DATABASE
+━━━━━━━━━━━━━━━━━━━━
+
+The app should maintain a master stored call list.
+
+If using backend:
+Store in:
+server/data/calls.json
+
+If frontend-only:
+Store in localStorage or IndexedDB.
+
+Add controls:
+- Export Master CSV
+- Download Daily Summary TXT
+- Clear All Calls
+
+Clear All Calls must require confirmation:
+“Type CLEAR to delete all stored calls.”
+
+Export Master CSV should export the cleaned/deduped database with columns:
+Name,Number,MaskedNumber,Date,Time,Duration,DurationSeconds,Status,Source,Notes,DedupeKey
+
+━━━━━━━━━━━━━━━━━━━━
+XML SUPPORT
+━━━━━━━━━━━━━━━━━━━━
+
+MicroSIP export code can export XML too.
+
+Support MicroSIP XML if simple:
+<calls>
+  <call type="in" name="..." number="..." time="..." duration="..." info="..." />
+</calls>
+
+Map fields:
+- type → status
+- name → caller
+- number → number
+- time Unix seconds → date/time
+- duration seconds → duration
+- info → notes
+
+If XML parsing fails, show:
+“XML import failed. Try CSV export instead.”
+
+━━━━━━━━━━━━━━━━━━━━
+VISUAL DASHBOARD
+━━━━━━━━━━━━━━━━━━━━
+
+Keep current clean dark visualization style.
+
+Show:
+- Total Calls
+- Answered / Ended
+- Missed / Canceled
+- Voicemails
+- Repeat Callers
+- Average Duration
+- Longest Call
+- Peak Hour
+
+Charts:
+- Calls by hour
+- Calls by day
+- Calls by status
+- Top repeat callers
+- Longest calls
+- Follow-up targets
+
+Table:
+- Caller
+- Masked Number
+- Date
+- Time
+- Duration
+- Status
+- Source
+- Notes
+
+Filters:
+- All
+- Answered
+- Missed/Canceled
+- Voicemail
+- Repeat Callers
+- Outgoing
+
+━━━━━━━━━━━━━━━━━━━━
+FOLLOW-UP TARGETS
+━━━━━━━━━━━━━━━━━━━━
+
+Follow-up panel should include:
+- Missed calls
+- Canceled calls
+- Voicemails
+- Repeat callers
+
+Show:
+Caller | Masked Number | Reason | Last Time | Count
+
+Reason examples:
+- Missed
+- Canceled
+- Voicemail
+- Repeat Caller
+
+━━━━━━━━━━━━━━━━━━━━
+DATA SOURCE LABELS
+━━━━━━━━━━━━━━━━━━━━
+
+Every imported call should have a source:
+- sample
+- manual
+- standard-csv
+- microsip-csv
+- microsip-ini
+- microsip-xml
+- callcentric-csv
+
+Show source in the table.
+
+Dashboard should show:
+Data Source: Master Database
+Last Import: [time]
+Last Import Format: [format]
+Last Import Result: X imported / Y skipped
+
+━━━━━━━━━━━━━━━━━━━━
+MANUAL ADD CALL
+━━━━━━━━━━━━━━━━━━━━
+
+Keep a simple manual add form:
+- Caller name
+- Phone number
+- Date
+- Time
+- Duration
+- Status
+- Notes
+
+When manually adding:
+- generate dedupeKey
+- prevent duplicate manual entries too
+
+━━━━━━━━━━━━━━━━━━━━
+REPORT EXPORT
+━━━━━━━━━━━━━━━━━━━━
+
+Add:
+Generate Daily Summary
+
+Report includes:
+PACIFIC SYSTEMS CALL LOGGER
+DAILY HOTLINE SUMMARY
+
+Date:
+Total Calls:
+Answered / Ended:
+Missed / Canceled:
+Voicemails:
+Outgoing:
+Repeat Callers:
+Peak Hour:
+Longest Call:
+Average Duration:
+
+Import Status:
+Last Import:
+Last Import Format:
+New Calls Imported:
+Duplicates Skipped:
+
+Operator Summary:
+Plain-English summary based on the data.
+
+Follow-Up Targets:
+List top missed/canceled/voicemail/repeat caller targets.
+
+Buttons:
+- Copy Report
+- Download TXT
+
+━━━━━━━━━━━━━━━━━━━━
+ERROR HANDLING
+━━━━━━━━━━━━━━━━━━━━
+
+If file is empty:
+“Import failed: file is empty.”
+
+If columns are wrong:
+“Import failed: could not detect call-log format.”
+
+If duplicate import:
+“No new calls found. All rows were already imported.”
+
+If some rows fail:
+“Imported X calls. Skipped Y duplicates. Z rows had errors.”
+
+Show row-level errors in a small collapsible error panel.
+
+━━━━━━━━━━━━━━━━━━━━
+IMPORTANT DESIGN RULE
+━━━━━━━━━━━━━━━━━━━━
+
+Do not overbuild.
+
+This is a call logger and visualizer.
+
+The main workflow must be:
+1. Export call log from MicroSIP/Callcentric
+2. Drag/drop file into app
+3. Confirm import
+4. Dashboard updates
+5. Export summary/master CSV
+
+Keep it simple, reliable, and easy.

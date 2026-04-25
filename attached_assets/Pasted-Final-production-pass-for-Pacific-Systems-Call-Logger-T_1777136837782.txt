@@ -1,0 +1,248 @@
+Final production pass for Pacific Systems Call Logger.
+
+The app is working. Now clean it up and make it deployment-ready.
+
+Main goals:
+1. Remove all mock/sample data from the default live app.
+2. Make import clean, compact, and professional.
+3. Add one-page visual report export.
+4. Prepare for EdgeOne deployment.
+5. Keep the app simple: import calls → visualize → export report.
+
+━━━━━━━━━━━━━━━━━━━━
+1. REMOVE MOCK DATA BY DEFAULT
+━━━━━━━━━━━━━━━━━━━━
+
+No mock/sample calls should appear on first load.
+
+Default state:
+- Total Calls: 0
+- Charts empty
+- Table empty
+- Follow-up queue empty
+- Data Source: No data loaded
+- Last Import: None
+
+Show empty state text:
+“No call logs imported yet. Import a MicroSIP or Callcentric export to begin.”
+
+Keep a “Load Demo Data” button only if needed, but hide it under:
+Developer / Demo Tools
+
+Default user should never see fake data unless they intentionally click it.
+
+━━━━━━━━━━━━━━━━━━━━
+2. MAKE IMPORT BOX SMALLER AND SEXIER
+━━━━━━━━━━━━━━━━━━━━
+
+The import box is too huge at the top.
+
+Replace it with a compact import card near the top-right or below metrics.
+
+Design:
+- Smaller panel
+- Cleaner border
+- Better spacing
+- One main button: Import Call Log
+- Drag/drop zone should be compact, not massive
+- Textarea should be collapsed by default
+
+Import card should show:
+IMPORT CALL LOG
+Supports: MicroSIP CSV / XML / INI, Callcentric CSV
+Safe Import: ON
+Duplicates: skipped automatically
+
+Buttons:
+- Choose File
+- Paste Text
+- Import
+- Clear
+
+Behavior:
+- “Paste Text” expands the textarea.
+- Drag/drop still works.
+- File picker still works.
+- After import, collapse the panel again and show result:
+  “Imported X new / skipped Y duplicates.”
+
+Make the import workflow feel clean and professional.
+
+━━━━━━━━━━━━━━━━━━━━
+3. SUPPORT FOLDER IMPORT IF POSSIBLE
+━━━━━━━━━━━━━━━━━━━━
+
+If the browser supports it, allow folder import using webkitdirectory.
+
+Add button:
+Import Folder
+
+Behavior:
+- User can select a folder containing CSV / TXT / INI / XML files.
+- App scans supported files.
+- Parses all valid call-log files.
+- Dedupes across all files.
+- Shows result:
+  Files processed: X
+  Calls imported: Y
+  Duplicates skipped: Z
+  Errors: A
+
+If folder import is not supported in the browser, hide or disable the button with:
+“Folder import not supported in this browser.”
+
+Do not break regular file import.
+
+━━━━━━━━━━━━━━━━━━━━
+4. ONE-PAGE VISUAL REPORT
+━━━━━━━━━━━━━━━━━━━━
+
+Add button:
+Generate One-Page Report
+
+The report should open in a modal or report view.
+
+It must look like a clean printable intelligence-style one-page document.
+
+Title:
+PACIFIC SYSTEMS CALL LOGGER
+DAILY CALL ACTIVITY REPORT
+
+Include:
+- Date
+- Total Calls
+- Answered / Ended
+- Missed / Canceled
+- Voicemails
+- Outgoing
+- Repeat Callers
+- Peak Hour
+- Longest Call
+- Average Duration
+- Last Import
+- Data Source
+
+Visuals on the report:
+- Small calls-by-hour bar chart
+- Small calls-by-status chart or compact bars
+- Top repeat callers list
+- Follow-up targets list
+
+Operator Summary:
+Auto-generated paragraph based on data.
+
+Follow-Up:
+Bullets for missed/canceled/voicemail/repeat callers.
+
+Buttons:
+- Print / Save PDF
+- Download HTML Report
+- Download TXT Summary
+- Copy Summary
+
+Important:
+The report must fit cleanly on one page when printed.
+Use print CSS:
+@media print
+Hide app chrome/buttons.
+Set page size cleanly.
+Avoid cutting charts across pages.
+
+━━━━━━━━━━━━━━━━━━━━
+5. EXPORTS
+━━━━━━━━━━━━━━━━━━━━
+
+Keep:
+- Export Master CSV
+- Download TXT Summary
+
+Add:
+- Download HTML One-Page Report
+
+The HTML report should be self-contained enough to open later.
+
+━━━━━━━━━━━━━━━━━━━━
+6. EDGEONE DEPLOYMENT READINESS
+━━━━━━━━━━━━━━━━━━━━
+
+Prepare the app for EdgeOne static deployment.
+
+If the app is frontend-only:
+- Use localStorage or IndexedDB for stored calls.
+- No server dependency required.
+- Ensure npm run build works.
+- Ensure Vite build output is dist.
+
+If the app currently has backend/local JSON:
+- Add a frontend-only fallback using localStorage.
+- For EdgeOne static deployment, the app should still work for importing, visualizing, and exporting data.
+- Clearly separate optional backend API code from frontend static mode.
+
+Add a small config constant:
+const STORAGE_MODE = "localStorage"
+
+Do not require a running server for the basic app.
+
+Package should be:
+- Replit preview works
+- Static build works
+- EdgeOne deployment works
+
+━━━━━━━━━━━━━━━━━━━━
+7. KEEP DESIGN CLEAN
+━━━━━━━━━━━━━━━━━━━━
+
+Keep current dark data-visualization look.
+
+Improve:
+- Import panel placement
+- Button styling
+- Empty states
+- Report view
+- Spacing
+- Readability
+
+Do not make it flashy.
+Do not add fake live API.
+Do not add login.
+Do not add role system.
+Do not overbuild.
+
+This is a private call logger and data visualizer.
+
+━━━━━━━━━━━━━━━━━━━━
+8. FINAL USER FLOW
+━━━━━━━━━━━━━━━━━━━━
+
+The final workflow must be:
+
+1. Open app
+2. See empty dashboard if no data
+3. Click Import Call Log
+4. Drag/drop or choose MicroSIP/Callcentric export
+5. App dedupes automatically
+6. Dashboard visualizes real data
+7. Generate One-Page Report
+8. Print/save PDF or download summary
+
+Make that workflow obvious and smooth.
+
+━━━━━━━━━━━━━━━━━━━━
+9. ACCEPTANCE TESTS
+━━━━━━━━━━━━━━━━━━━━
+
+Before finishing, verify:
+
+- First load has no mock data
+- Import CSV works
+- Import same file twice skips duplicates
+- Import XML/INI still works if already supported
+- Folder import does not break normal import
+- Metrics update after import
+- Charts update after import
+- Follow-up targets update after import
+- One-page report generates
+- Print layout is clean
+- Export Master CSV works
+- npm run build works
+- App can run as static frontend for EdgeOne
