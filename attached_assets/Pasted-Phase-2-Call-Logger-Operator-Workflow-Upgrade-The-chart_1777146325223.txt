@@ -1,0 +1,116 @@
+Phase 2 — Call Logger Operator Workflow Upgrade
+
+The chart/date/parser bugs are fixed. Now upgrade the app from a passive dashboard into a usable call follow-up system.
+
+Build the following:
+
+1. Caller Detail Drawer
+When I click any caller in:
+- Repeat Callers
+- Follow-up Targets
+- Follow-up Queue
+- Longest Calls
+- Any table row
+
+Open a right-side detail drawer showing:
+- Caller name
+- Number
+- Total call count
+- Answered count
+- Missed/canceled count
+- Last contact
+- First contact
+- Average duration
+- Longest duration
+- Full call history timeline
+- Status tags
+
+2. Caller Notes
+Add local notes per caller/number:
+- Notes textarea
+- Save note
+- Last updated timestamp
+- Notes persist in localStorage
+- Notes should be tied to normalized phone number, not display name
+
+3. Follow-up Status
+Each caller should support:
+- New
+- Needs callback
+- Contacted
+- Resolved
+- Ignore
+
+Add buttons in the caller drawer to update status.
+Persist status in localStorage.
+
+4. Priority Scoring
+Create a simple follow-up priority score:
+- +5 for each missed/canceled call
+- +3 for repeat caller
+- +2 if last contact was today
+- +2 if caller has no notes
+- -5 if resolved
+- -10 if ignored
+
+Show priority level:
+- CRITICAL
+- HIGH
+- MEDIUM
+- LOW
+- RESOLVED
+- IGNORED
+
+5. Upgrade Follow-up Targets
+Sort Follow-up Targets by priority score, not just count.
+Show:
+- Caller
+- Count
+- Missed count
+- Last contact
+- Priority badge
+- Status badge
+
+6. Add Search
+Add a search box near the top:
+- Search caller name
+- Search number
+- Search notes
+- Search status
+
+7. Add Filters
+Add quick filters:
+- All
+- Missed only
+- Repeat callers
+- Needs callback
+- Unresolved
+- Resolved
+- Ignored
+
+8. Add Export
+Add “Export Follow-Up CSV” button.
+Export:
+- caller name
+- number
+- total calls
+- missed calls
+- last contact
+- status
+- priority
+- notes
+
+9. Data Safety
+Do not break the existing parser, schema v3 cleanup, charts, donut, repeat callers, longest calls, or import debug summary.
+Keep all existing working features intact.
+
+10. Verify
+After implementation:
+- Import existing MicroSIP CSV
+- Click a caller
+- Add a note
+- Change follow-up status
+- Refresh page
+- Confirm note/status persists
+- Confirm Follow-up Targets updates correctly
+- Confirm export CSV downloads
