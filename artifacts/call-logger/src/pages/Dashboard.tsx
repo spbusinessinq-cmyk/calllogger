@@ -110,6 +110,7 @@ export default function Dashboard() {
   const [allParsed, setAllParsed] = useState<StoredCall[] | null>(null);
   const [parseErrors, setParseErrors] = useState<string[]>([]);
   const [importMsg, setImportMsg] = useState<{ text: string; type: "ok" | "warn" | "err" } | null>(null);
+  const [statusDebug, setStatusDebug] = useState<Record<string, number> | null>(null);
   const [isDragOver, setIsDragOver] = useState(false);
   const [showErrors, setShowErrors] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -243,11 +244,15 @@ export default function Dashboard() {
     setShowErrors(false);
     if (rows.length === 0) {
       setImportMsg({ text: errors[0] ?? "Import failed: no rows detected.", type: "err" });
-      setPreviewRows(null); setAllParsed(null); return;
+      setPreviewRows(null); setAllParsed(null); setStatusDebug(null); return;
     }
     const stored = rows.map((r) => toStoredCall(r, format as StoredCall["source"]));
     setAllParsed(stored);
     setPreviewRows(stored.slice(0, 5));
+    // Compute per-status breakdown for debug display
+    const counts: Record<string, number> = {};
+    stored.forEach((c) => { counts[c.status] = (counts[c.status] ?? 0) + 1; });
+    setStatusDebug(counts);
     setImportMsg({ text: `Auto-detected: ${FORMAT_LABELS[format]}. ${rows.length} row${rows.length !== 1 ? "s" : ""} ready — review preview below.`, type: "ok" });
   }, []);
 
@@ -318,7 +323,7 @@ export default function Dashboard() {
 
   const handleClearImport = useCallback(() => {
     setImportText(""); setPreviewRows(null); setAllParsed(null);
-    setImportMsg(null); setDetectedFormat(""); setParseErrors([]); setShowPaste(false);
+    setImportMsg(null); setStatusDebug(null); setDetectedFormat(""); setParseErrors([]); setShowPaste(false);
   }, []);
 
   // ── Manual add
@@ -443,6 +448,28 @@ export default function Dashboard() {
                 <span className={`text-[10px] font-mono px-3 py-1.5 border flex-1 min-w-0 truncate ${msgColor}`}>{importMsg.text}</span>
               )}
             </div>
+
+            {/* Status breakdown debug */}
+            {statusDebug && (
+              <div className="mt-2 border border-zinc-800 bg-zinc-950/60 px-3 py-2">
+                <p className="text-[9px] uppercase tracking-widest text-zinc-600 mb-1.5">Mapped statuses</p>
+                <div className="flex flex-wrap gap-x-4 gap-y-1">
+                  {(["Answered", "Call Ended", "Missed", "Canceled", "Voicemail", "Outgoing", "Other"] as const).map((s) => {
+                    const n = statusDebug[s] ?? 0;
+                    const accent = s === "Answered" ? "text-green-400" : s === "Call Ended" ? "text-blue-400" : s === "Missed" ? "text-red-400" : s === "Canceled" ? "text-orange-400" : s === "Voicemail" ? "text-amber-400" : s === "Outgoing" ? "text-violet-400" : n > 0 ? "text-red-300" : "text-zinc-700";
+                    return (
+                      <span key={s} className="text-[10px] font-mono">
+                        <span className="text-zinc-600">{s}: </span>
+                        <span className={`font-bold ${accent}`}>{n}</span>
+                      </span>
+                    );
+                  })}
+                  {(statusDebug["Other"] ?? 0) > 0 && (
+                    <span className="text-[9px] text-red-500 self-center">↑ Other is high — check Info field values</span>
+                  )}
+                </div>
+              </div>
+            )}
 
             {/* Row errors */}
             {parseErrors.length > 0 && (

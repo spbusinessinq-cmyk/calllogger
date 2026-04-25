@@ -14,6 +14,7 @@ export function normalizeName(raw: string): string {
   return raw.trim().toLowerCase();
 }
 
+// Used by Standard CSV and Callcentric parsers where a single status column exists.
 function normalizeStatus(raw: string): CallStatus {
   const s = raw.trim().toLowerCase();
   if (s === "answered" || s === "in") return "Answered";
@@ -22,10 +23,9 @@ function normalizeStatus(raw: string): CallStatus {
   if (s === "missed" || s === "miss") return "Missed";
   if (s === "declined") return "Missed";
   if (s === "canceled" || s === "cancelled") return "Canceled";
-  if (s === "voicemail") return "Voicemail";
+  if (s === "voicemail" || s === "voice mail") return "Voicemail";
+  if (s === "busy" || s === "no answer") return "Missed";
   if (s === "out" || s === "outgoing") return "Outgoing";
-  if (s === "else" || s === "other") return "Other";
-  // MicroSIP INI numeric types
   if (s === "0") return "Outgoing";
   if (s === "1") return "Answered";
   if (s === "2") return "Missed";
@@ -33,19 +33,35 @@ function normalizeStatus(raw: string): CallStatus {
   return "Other";
 }
 
-// Returns a note string for MicroSIP type values that map to a different canonical status,
-// so the original type label is preserved in the notes field.
-function typeNote(raw: string): string {
-  const s = raw.trim().toLowerCase();
-  if (s === "answered elsewhere") return "Answered Elsewhere";
-  if (s === "declined") return "Declined";
-  return "";
-}
+// MicroSIP two-field resolution:
+// 1. Inspect Info for descriptive keywords (highest priority — this is what MicroSIP fills in)
+// 2. Fall back to Type code only if Info gives no signal
+export function resolveMicroSIPStatus(info: string, typeRaw: string): CallStatus {
+  const i = info.trim().toLowerCase();
 
-function withTypeNote(info: string, raw: string): string {
-  const note = typeNote(raw);
-  if (!note) return info;
-  return info ? `${note} — ${info}` : note;
+  // Info-field rules (covers the vast majority of real MicroSIP exports)
+  if (i.includes("answered elsewhere")) return "Answered";
+  if (i.includes("call ended")) return "Call Ended";
+  if (i.includes("cancelled") || i.includes("canceled")) return "Canceled";
+  if (i.includes("declined")) return "Missed";
+  if (i.includes("busy")) return "Missed";
+  if (i.includes("no answer")) return "Missed";
+  if (i.includes("voicemail") || i.includes("voice mail")) return "Voicemail";
+
+  // Type-field fallback (used when Info is blank or unrecognised)
+  const t = typeRaw.trim().toLowerCase();
+  if (t === "in" || t === "answered") return "Answered";
+  if (t === "out" || t === "outgoing") return "Outgoing";
+  if (t === "miss" || t === "missed") return "Missed";
+  if (t === "canceled" || t === "cancelled") return "Canceled";
+  if (t === "voicemail") return "Voicemail";
+  // MicroSIP INI numeric type codes
+  if (t === "0") return "Outgoing";
+  if (t === "1") return "Answered";
+  if (t === "2") return "Missed";
+  if (t === "3") return "Other";
+  // "else" and anything else → Other
+  return "Other";
 }
 
 function parseDurationToSeconds(raw: string): number {
@@ -238,10 +254,10 @@ function parseMicroSIPCSV(text: string): ParseResult {
       const info = r["Info"] ?? r["info"] ?? "";
 
       const { date, time } = unixToDatetime(timeRaw);
-      const status = normalizeStatus(typeRaw);
+      const status = resolveMicroSIPStatus(info, typeRaw);
       const durationSeconds = parseDurationToSeconds(durationRaw);
 
-      rows.push({ callerName: name, phoneNumber: number, date, time, durationSeconds, status, notes: withTypeNote(info, typeRaw) });
+      rows.push({ callerName: name, phoneNumber: number, date, time, durationSeconds, status, notes: info });
     } catch (e) {
       errors.push(`Row ${i + 2}: ${String(e)}`);
     }
@@ -268,10 +284,10 @@ function parseMicroSIPINI(text: string): ParseResult {
       const [number, name, typeRaw, unixTime, durationRaw, ...infoParts] = parts;
       const info = infoParts.join(";");
       const { date, time } = unixToDatetime(unixTime);
-      const status = normalizeStatus(typeRaw);
+      const status = resolveMicroSIPStatus(info, typeRaw);
       const durationSeconds = parseDurationToSeconds(durationRaw);
 
-      rows.push({ callerName: name ?? "", phoneNumber: number ?? "", date, time, durationSeconds, status, notes: withTypeNote(info, typeRaw) });
+      rows.push({ callerName: name ?? "", phoneNumber: number ?? "", date, time, durationSeconds, status, notes: info });
     } catch (e) {
       errors.push(`INI line "${trimmed.slice(0, 40)}": ${String(e)}`);
     }
@@ -304,10 +320,10 @@ function parseMicroSIPXML(text: string): ParseResult {
         const info = el.getAttribute("info") ?? "";
 
         const { date, time } = unixToDatetime(unixTime);
-        const status = normalizeStatus(typeRaw);
+        const status = resolveMicroSIPStatus(info, typeRaw);
         const durationSeconds = parseDurationToSeconds(durationRaw);
 
-        rows.push({ callerName: name, phoneNumber: number, date, time, durationSeconds, status, notes: withTypeNote(info, typeRaw) });
+        rows.push({ callerName: name, phoneNumber: number, date, time, durationSeconds, status, notes: info });
       } catch (e) {
         errors.push(`XML call element ${i}: ${String(e)}`);
       }
