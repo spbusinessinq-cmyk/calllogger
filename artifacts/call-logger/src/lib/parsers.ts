@@ -17,18 +17,35 @@ export function normalizeName(raw: string): string {
 function normalizeStatus(raw: string): CallStatus {
   const s = raw.trim().toLowerCase();
   if (s === "answered" || s === "in") return "Answered";
+  if (s === "answered elsewhere") return "Answered";
   if (s === "call ended" || s === "ended") return "Call Ended";
   if (s === "missed" || s === "miss") return "Missed";
+  if (s === "declined") return "Missed";
   if (s === "canceled" || s === "cancelled") return "Canceled";
   if (s === "voicemail") return "Voicemail";
   if (s === "out" || s === "outgoing") return "Outgoing";
-  if (s === "else" || s === "other" || s === "answered elsewhere") return "Other";
+  if (s === "else" || s === "other") return "Other";
   // MicroSIP INI numeric types
   if (s === "0") return "Outgoing";
   if (s === "1") return "Answered";
   if (s === "2") return "Missed";
   if (s === "3") return "Other";
   return "Other";
+}
+
+// Returns a note string for MicroSIP type values that map to a different canonical status,
+// so the original type label is preserved in the notes field.
+function typeNote(raw: string): string {
+  const s = raw.trim().toLowerCase();
+  if (s === "answered elsewhere") return "Answered Elsewhere";
+  if (s === "declined") return "Declined";
+  return "";
+}
+
+function withTypeNote(info: string, raw: string): string {
+  const note = typeNote(raw);
+  if (!note) return info;
+  return info ? `${note} — ${info}` : note;
 }
 
 function parseDurationToSeconds(raw: string): number {
@@ -224,7 +241,7 @@ function parseMicroSIPCSV(text: string): ParseResult {
       const status = normalizeStatus(typeRaw);
       const durationSeconds = parseDurationToSeconds(durationRaw);
 
-      rows.push({ callerName: name, phoneNumber: number, date, time, durationSeconds, status, notes: info });
+      rows.push({ callerName: name, phoneNumber: number, date, time, durationSeconds, status, notes: withTypeNote(info, typeRaw) });
     } catch (e) {
       errors.push(`Row ${i + 2}: ${String(e)}`);
     }
@@ -254,7 +271,7 @@ function parseMicroSIPINI(text: string): ParseResult {
       const status = normalizeStatus(typeRaw);
       const durationSeconds = parseDurationToSeconds(durationRaw);
 
-      rows.push({ callerName: name ?? "", phoneNumber: number ?? "", date, time, durationSeconds, status, notes: info });
+      rows.push({ callerName: name ?? "", phoneNumber: number ?? "", date, time, durationSeconds, status, notes: withTypeNote(info, typeRaw) });
     } catch (e) {
       errors.push(`INI line "${trimmed.slice(0, 40)}": ${String(e)}`);
     }
@@ -290,7 +307,7 @@ function parseMicroSIPXML(text: string): ParseResult {
         const status = normalizeStatus(typeRaw);
         const durationSeconds = parseDurationToSeconds(durationRaw);
 
-        rows.push({ callerName: name, phoneNumber: number, date, time, durationSeconds, status, notes: info });
+        rows.push({ callerName: name, phoneNumber: number, date, time, durationSeconds, status, notes: withTypeNote(info, typeRaw) });
       } catch (e) {
         errors.push(`XML call element ${i}: ${String(e)}`);
       }
