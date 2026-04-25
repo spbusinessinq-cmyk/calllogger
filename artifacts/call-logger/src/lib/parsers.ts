@@ -14,7 +14,6 @@ export function normalizeName(raw: string): string {
   return raw.trim().toLowerCase();
 }
 
-// Used by Standard CSV and Callcentric parsers where a single status column exists.
 function normalizeStatus(raw: string): CallStatus {
   const s = raw.trim().toLowerCase();
   if (s === "answered" || s === "in") return "Answered";
@@ -33,9 +32,6 @@ function normalizeStatus(raw: string): CallStatus {
   return "Other";
 }
 
-// Single canonical function for deriving a CallStatus from any notes/info text.
-// Used both by import parsers and the stored-call migration.
-// Notes field contains the original MicroSIP Info value which is the most reliable signal.
 export function normalizeStoredStatus(currentStatus: CallStatus, notes: string): CallStatus {
   const n = notes.trim().toLowerCase();
   if (n.includes("answered elsewhere")) return "Answered";
@@ -48,12 +44,8 @@ export function normalizeStoredStatus(currentStatus: CallStatus, notes: string):
   return currentStatus;
 }
 
-// MicroSIP two-field resolution:
-// 1. Inspect Info for descriptive keywords (highest priority)
-// 2. Fall back to Type code only if Info gives no signal
 export function resolveMicroSIPStatus(info: string, typeRaw: string): CallStatus {
   const i = info.trim().toLowerCase();
-
   if (i.includes("answered elsewhere")) return "Answered";
   if (i.includes("call ended")) return "Call Ended";
   if (i.includes("cancelled") || i.includes("canceled")) return "Canceled";
@@ -63,7 +55,7 @@ export function resolveMicroSIPStatus(info: string, typeRaw: string): CallStatus
   if (i.includes("voicemail") || i.includes("voice mail")) return "Voicemail";
 
   const t = typeRaw.trim().toLowerCase();
-  if (t === "in" || t === "answered") return "Answered";
+  if (t === "in" || t === "incoming" || t === "answered") return "Answered";
   if (t === "out" || t === "outgoing") return "Outgoing";
   if (t === "miss" || t === "missed") return "Missed";
   if (t === "canceled" || t === "cancelled") return "Canceled";
@@ -86,10 +78,21 @@ function parseDurationToSeconds(raw: string): number {
   if (hMatch) total += parseInt(hMatch[1]) * 3600;
   if (mMatch) total += parseInt(mMatch[1]) * 60;
   if (sMatch) total += parseInt(sMatch[1]);
+  if (!hMatch && !mMatch && !sMatch) {
+    // Try HH:MM:SS
+    const colonParts = raw.split(":");
+    if (colonParts.length === 3) {
+      const [h, m, s] = colonParts.map(Number);
+      if (!isNaN(h) && !isNaN(m) && !isNaN(s)) return h * 3600 + m * 60 + s;
+    }
+    if (colonParts.length === 2) {
+      const [m, s] = colonParts.map(Number);
+      if (!isNaN(m) && !isNaN(s)) return m * 60 + s;
+    }
+  }
   return total;
 }
 
-// Format a local date as YYYY-MM-DD using LOCAL date methods (not UTC).
 function localDateKey(d: Date): string {
   const y = d.getFullYear();
   const m = String(d.getMonth() + 1).padStart(2, "0");
@@ -97,20 +100,21 @@ function localDateKey(d: Date): string {
   return `${y}-${m}-${day}`;
 }
 
-// Format local time as HH:MM
 function localTimeStr(d: Date): string {
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
 // Convert Unix timestamp (seconds) to canonical fields using LOCAL time.
-// Critical: toISOString() returns UTC date which may be a different calendar day.
-// Always use getFullYear/getMonth/getDate for dateKey.
+// Requires ts >= 1_000_000_000 (Jan 2001+) to prevent garbage from small integers.
 export function unixToDatetime(unix: string | number): {
   date: string; time: string; hour: number;
   startedAtISO: string; dateKey: string; hourKey: number;
 } {
   const ts = typeof unix === "string" ? parseInt(unix, 10) : unix;
-  if (isNaN(ts) || ts <= 0) return { date: "", time: "", hour: 0, startedAtISO: "", dateKey: "", hourKey: 0 };
+  // Must be a plausible unix timestamp (≥ 2001-09-08)
+  if (isNaN(ts) || ts < 1_000_000_000) {
+    return { date: "", time: "", hour: 0, startedAtISO: "", dateKey: "", hourKey: 0 };
+  }
   const d = new Date(ts * 1000);
   const dateKey = localDateKey(d);
   const time = localTimeStr(d);
@@ -118,25 +122,21 @@ export function unixToDatetime(unix: string | number): {
   return { date: dateKey, time, hour: hourKey, startedAtISO: d.toISOString(), dateKey, hourKey };
 }
 
-// Robust Standard CSV date+time parsing.
-// Accepts many formats: YYYY-MM-DD, M/D/YYYY, "Apr 25 2026" + HH:MM, HH:MM:SS, h:MM PM
+// Robust date+time string parsing. Handles many real-world formats.
 export function parseDatetime(dateRaw: string, timeRaw: string): {
   date: string; time: string; hour: number;
   startedAtISO: string; dateKey: string; hourKey: number;
 } {
-  const dateStr = dateRaw.trim();
-  const timeStr = timeRaw.trim();
+  const dateStr = (dateRaw ?? "").trim();
+  const timeStr = (timeRaw ?? "").trim();
 
-  // Normalize date: convert M/D/YYYY → YYYY-MM-DD
   function normalizeDate(s: string): string {
-    // M/D/YYYY or MM/DD/YYYY
     const slashMatch = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
     if (slashMatch) {
       return `${slashMatch[3]}-${slashMatch[1].padStart(2, "0")}-${slashMatch[2].padStart(2, "0")}`;
     }
-    // Already YYYY-MM-DD
     if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
-    // "Apr 25 2026" or "April 25, 2026"
+    // "Apr 25 2026" or "April 25, 2026" etc.
     try {
       const d = new Date(s);
       if (!isNaN(d.getTime())) return localDateKey(d);
@@ -144,8 +144,8 @@ export function parseDatetime(dateRaw: string, timeRaw: string): {
     return s;
   }
 
-  // Normalize time: convert 12-hour to 24-hour
   function normalizeTime(s: string): string {
+    // 12-hour: "9:30 AM", "09:30:00 PM"
     const ampm = s.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)$/i);
     if (ampm) {
       let h = parseInt(ampm[1], 10);
@@ -156,7 +156,7 @@ export function parseDatetime(dateRaw: string, timeRaw: string): {
       return `${String(h).padStart(2, "0")}:${min}`;
     }
     // Already HH:MM or HH:MM:SS
-    if (/^\d{2}:\d{2}/.test(s)) return s.slice(0, 5);
+    if (/^\d{1,2}:\d{2}/.test(s)) return s.slice(0, 5);
     return s;
   }
 
@@ -168,33 +168,58 @@ export function parseDatetime(dateRaw: string, timeRaw: string): {
     const d = new Date(combined);
     if (!isNaN(d.getTime())) {
       return {
-        date: localDateKey(d),
-        time: localTimeStr(d),
-        hour: d.getHours(),
-        startedAtISO: d.toISOString(),
-        dateKey: localDateKey(d),
-        hourKey: d.getHours(),
+        date: localDateKey(d), time: localTimeStr(d), hour: d.getHours(),
+        startedAtISO: d.toISOString(), dateKey: localDateKey(d), hourKey: d.getHours(),
+      };
+    }
+    // Try appending :00 for HH:MM
+    const d2 = new Date(`${combined}:00`);
+    if (!isNaN(d2.getTime())) {
+      return {
+        date: localDateKey(d2), time: localTimeStr(d2), hour: d2.getHours(),
+        startedAtISO: d2.toISOString(), dateKey: localDateKey(d2), hourKey: d2.getHours(),
       };
     }
   }
 
   if (normalDate) {
-    const d = new Date(normalDate + "T12:00:00");
-    if (!isNaN(d.getTime())) {
+    // date-only — use it for day grouping, parse time separately
+    if (/^\d{4}-\d{2}-\d{2}$/.test(normalDate)) {
       const hour = normalTime ? parseInt(normalTime.split(":")[0], 10) : 0;
       const safeHour = isNaN(hour) ? 0 : hour;
+      // Construct a proper ISO if we have a time
+      if (normalTime && /^\d{2}:\d{2}/.test(normalTime)) {
+        const d = new Date(`${normalDate}T${normalTime}`);
+        if (!isNaN(d.getTime())) {
+          return {
+            date: localDateKey(d), time: localTimeStr(d), hour: d.getHours(),
+            startedAtISO: d.toISOString(), dateKey: localDateKey(d), hourKey: d.getHours(),
+          };
+        }
+      }
+      // date with no usable time
+      const d = new Date(`${normalDate}T${String(safeHour).padStart(2,"0")}:00:00`);
+      if (!isNaN(d.getTime())) {
+        return {
+          date: localDateKey(d), time: normalTime || "",
+          hour: safeHour, startedAtISO: safeHour > 0 ? d.toISOString() : "",
+          dateKey: localDateKey(d), hourKey: safeHour,
+        };
+      }
+    }
+  }
+
+  // Last fallback: try parsing the whole dateStr as an ISO-like string
+  if (dateStr) {
+    const d = new Date(dateStr);
+    if (!isNaN(d.getTime()) && d.getFullYear() > 2000) {
       return {
-        date: localDateKey(d),
-        time: normalTime || "",
-        hour: safeHour,
-        startedAtISO: "",
-        dateKey: localDateKey(d),
-        hourKey: safeHour,
+        date: localDateKey(d), time: localTimeStr(d), hour: d.getHours(),
+        startedAtISO: d.toISOString(), dateKey: localDateKey(d), hourKey: d.getHours(),
       };
     }
   }
 
-  // Fallback: raw strings, no ISO
   const hour = normalTime ? parseInt(normalTime.split(":")[0], 10) : 0;
   return { date: dateStr, time: timeStr, hour: isNaN(hour) ? 0 : hour, startedAtISO: "", dateKey: "", hourKey: isNaN(hour) ? 0 : hour };
 }
@@ -262,25 +287,29 @@ export function detectFormat(text: string): DetectedFormat {
   if (trimmed.startsWith("<") && (trimmed.includes("<calls") || trimmed.includes("<call"))) {
     return "microsip-xml";
   }
-  if (trimmed.startsWith("[Calls]") || trimmed.startsWith("[Settings]") || /^\d+=\S+;/.test(trimmed.split("\n").find(l => /^\d+=/.test(l.trim())) ?? "")) {
+  if (trimmed.startsWith("[Calls]") || trimmed.startsWith("[Settings]") ||
+    /^\d+=\S+;/.test(trimmed.split("\n").find(l => /^\d+=/.test(l.trim())) ?? "")) {
     return "microsip-ini";
   }
-  const firstLine = trimmed.split("\n")[0].toLowerCase().replace(/\s/g, "");
-  if (firstLine.includes("type,name,number") || firstLine.includes("type,number,name")) {
+  const firstLine = trimmed.split("\n")[0].toLowerCase().replace(/\s+/g, "");
+  // MicroSIP CSV: starts with type or direction column + name + number
+  if (
+    firstLine.startsWith("type,name,number") ||
+    firstLine.startsWith("type,number,name") ||
+    firstLine.startsWith("direction,name,number") ||
+    firstLine.startsWith("direction,number,name") ||
+    // Broader: has "type" or "direction" + "name" + "number" in the header
+    (firstLine.includes("type") && firstLine.includes("name") && firstLine.includes("number")) ||
+    (firstLine.includes("direction") && firstLine.includes("name") && firstLine.includes("number"))
+  ) {
     return "microsip-csv";
   }
-  if (
-    firstLine.includes("name,number") &&
-    (firstLine.includes("date") || firstLine.includes("time"))
-  ) {
-    return "standard-csv";
-  }
-  if (
-    firstLine.includes("direction") ||
-    firstLine.includes("callerid") ||
-    firstLine.includes("caller id")
-  ) {
+  if (firstLine.includes("direction") || firstLine.includes("callerid") || firstLine.includes("callerid")) {
     return "callcentric-csv";
+  }
+  if (firstLine.includes("name") && firstLine.includes("number") &&
+    (firstLine.includes("date") || firstLine.includes("time"))) {
+    return "standard-csv";
   }
   if (trimmed.includes(",")) {
     return "standard-csv";
@@ -298,13 +327,24 @@ export const FORMAT_LABELS: Record<DetectedFormat, string> = {
 };
 
 // ──────────────────────────────────────────────
-// Parsers
+// ParseResult with import debug info
 // ──────────────────────────────────────────────
+
+export interface ImportDebug {
+  importedCount: number;
+  skippedCount: number;        // rows skipped due to invalid timestamp
+  invalidTimestampCount: number;
+  earliestCall: string | null; // ISO string
+  latestCall: string | null;   // ISO string
+  busiestHours: Array<{ hour: number; label: string; count: number }>;
+  detectedColumns: string[];   // column names found
+}
 
 export interface ParseResult {
   rows: ParsedRow[];
   errors: string[];
   format: DetectedFormat;
+  debug?: ImportDebug;
 }
 
 export function parseText(text: string): ParseResult {
@@ -316,28 +356,111 @@ export function parseText(text: string): ParseResult {
     case "callcentric-csv": return parseCallcentricCSV(text);
     case "standard-csv": return parseStandardCSV(text);
     default:
-      return { rows: [], errors: ["Could not detect call-log format. Expected columns: Name,Number,Date,Time,Duration,Status,Notes"], format };
+      return { rows: [], errors: ["Could not detect call-log format. Expected columns: Name,Number,Date,Time,Duration,Status,Notes or MicroSIP format with Type/Direction,Name,Number,Time,Duration,Info"], format };
   }
 }
 
+// ──────────────────────────────────────────────
+// Fuzzy column finder helper
+// ──────────────────────────────────────────────
+
+function makeFinder(keys: string[]) {
+  return (candidates: string[]): string | undefined =>
+    keys.find((k) => candidates.some((c) => k.trim().toLowerCase() === c.trim().toLowerCase())) ??
+    keys.find((k) => candidates.some((c) => k.trim().toLowerCase().includes(c.trim().toLowerCase())));
+}
+
+// ──────────────────────────────────────────────
+// Build ImportDebug from parsed rows
+// ──────────────────────────────────────────────
+
+function buildDebug(rows: ParsedRow[], skippedCount: number, detectedColumns: string[]): ImportDebug {
+  const validRows = rows.filter((r) => r.startedAtISO && r.startedAtISO !== "");
+  const invalidTimestampCount = rows.filter((r) => !r.startedAtISO || r.parseError).length;
+
+  let earliestCall: string | null = null;
+  let latestCall: string | null = null;
+  const hourCounts: Record<number, number> = {};
+
+  for (const r of validRows) {
+    const d = new Date(r.startedAtISO);
+    if (isNaN(d.getTime())) continue;
+    if (!earliestCall || r.startedAtISO < earliestCall) earliestCall = r.startedAtISO;
+    if (!latestCall || r.startedAtISO > latestCall) latestCall = r.startedAtISO;
+    hourCounts[r.hourKey] = (hourCounts[r.hourKey] ?? 0) + 1;
+  }
+
+  function hourLabel(h: number): string {
+    if (h === 0) return "12AM";
+    if (h < 12) return `${h}AM`;
+    if (h === 12) return "12PM";
+    return `${h - 12}PM`;
+  }
+
+  const busiestHours = Object.entries(hourCounts)
+    .sort(([, a], [, b]) => b - a)
+    .slice(0, 3)
+    .map(([h, count]) => ({ hour: Number(h), label: hourLabel(Number(h)), count }));
+
+  return {
+    importedCount: rows.length,
+    skippedCount,
+    invalidTimestampCount,
+    earliestCall,
+    latestCall,
+    busiestHours,
+    detectedColumns,
+  };
+}
+
+// ──────────────────────────────────────────────
 // Standard CSV: Name,Number,Date,Time,Duration,Status,Notes
+// ──────────────────────────────────────────────
+
 function parseStandardCSV(text: string): ParseResult {
   const result = Papa.parse<Record<string, string>>(text.trim(), { header: true, skipEmptyLines: true });
   const rows: ParsedRow[] = [];
   const errors: string[] = [];
+  const keys = result.meta.fields ?? [];
+  const find = makeFinder(keys);
+  let skipped = 0;
+
+  const nameKey = find(["Name", "CallerName", "Caller Name", "caller_name"]);
+  const numberKey = find(["Number", "Phone", "phone_number", "PhoneNumber"]);
+  const dateKey_ = find(["Date", "Call Date", "CallDate", "Start Date"]);
+  const timeKey = find(["Time", "Call Time", "Start Time", "CallTime", "StartTime", "Timestamp"]);
+  const durationKey = find(["Duration", "duration", "Length", "Seconds", "Call Length"]);
+  const statusKey = find(["Status", "Result", "Type", "Call Type"]);
+  const notesKey = find(["Notes", "Note", "Info", "Comment", "Description"]);
 
   for (let i = 0; i < result.data.length; i++) {
     const r = result.data[i];
     try {
-      const name = r["Name"] ?? r["name"] ?? r["CallerName"] ?? r["caller_name"] ?? "";
-      const number = r["Number"] ?? r["number"] ?? r["Phone"] ?? r["phone"] ?? "";
-      const dateRaw = r["Date"] ?? r["date"] ?? "";
-      const timeRaw = r["Time"] ?? r["time"] ?? "";
-      const durationRaw = r["Duration"] ?? r["duration"] ?? "0";
-      const status = normalizeStatus(r["Status"] ?? r["status"] ?? "Other");
-      const notes = r["Notes"] ?? r["notes"] ?? r["Info"] ?? r["info"] ?? "";
+      const name = (nameKey ? r[nameKey] : undefined) ?? "";
+      const number = (numberKey ? r[numberKey] : undefined) ?? "";
+      const dateRaw = (dateKey_ ? r[dateKey_] : undefined) ?? "";
+      const timeRaw = (timeKey ? r[timeKey] : undefined) ?? "";
+      const durationRaw = (durationKey ? r[durationKey] : undefined) ?? "0";
+      const status = normalizeStatus((statusKey ? r[statusKey] : undefined) ?? "Other");
+      const notes = (notesKey ? r[notesKey] : undefined) ?? "";
 
-      const ts = parseDatetime(dateRaw, timeRaw);
+      // Check if time looks like unix seconds (MicroSIP-style in standard-csv)
+      const tsNum = parseInt(timeRaw, 10);
+      const isUnixTs = !isNaN(tsNum) && tsNum >= 1_000_000_000;
+
+      let ts: ReturnType<typeof parseDatetime>;
+      if (isUnixTs) {
+        const u = unixToDatetime(timeRaw);
+        ts = { date: u.date, time: u.time, hour: u.hour, startedAtISO: u.startedAtISO, dateKey: u.dateKey, hourKey: u.hourKey };
+      } else {
+        ts = parseDatetime(dateRaw, timeRaw);
+      }
+
+      if (!ts.dateKey) {
+        skipped++;
+        errors.push(`Row ${i + 2}: Invalid timestamp (date="${dateRaw}" time="${timeRaw}") — skipped`);
+        continue;
+      }
 
       rows.push({
         callerName: name, phoneNumber: number,
@@ -345,62 +468,121 @@ function parseStandardCSV(text: string): ParseResult {
         durationSeconds: parseDurationToSeconds(durationRaw),
         status, notes,
         startedAtISO: ts.startedAtISO, dateKey: ts.dateKey, hourKey: ts.hourKey,
-        rawTime: dateRaw ? `${dateRaw} ${timeRaw}`.trim() : undefined,
+        rawTime: dateRaw ? `${dateRaw} ${timeRaw}`.trim() : timeRaw || undefined,
       });
     } catch (e) {
       errors.push(`Row ${i + 2}: ${String(e)}`);
     }
   }
-  return { rows, errors, format: "standard-csv" };
+
+  const debug = buildDebug(rows, skipped, keys);
+  return { rows, errors, format: "standard-csv", debug };
 }
 
-// MicroSIP CSV: Type,Name,Number,Time,Duration,Info
+// ──────────────────────────────────────────────
+// MicroSIP CSV
+// Supports: Type/Direction, Name, Number, Time (unix OR HH:MM:SS), Date (optional), Duration, Info/Notes
+// ──────────────────────────────────────────────
+
 function parseMicroSIPCSV(text: string): ParseResult {
   const result = Papa.parse<Record<string, string>>(text.trim(), { header: true, skipEmptyLines: true });
   const rows: ParsedRow[] = [];
   const errors: string[] = [];
+  const keys = result.meta.fields ?? [];
+  const find = makeFinder(keys);
+  let skipped = 0;
+
+  // Fuzzy-match all expected columns — covers many MicroSIP export variants
+  const typeKey = find(["Type", "Direction", "Call Direction", "CallType", "Call Type"]);
+  const nameKey = find(["Name", "CallerName", "Caller Name", "Contact"]);
+  const numberKey = find(["Number", "Phone", "Phone Number", "PhoneNumber", "Caller", "From", "To"]);
+  // Date column is optional — classic MicroSIP has none (unix timestamp in Time)
+  const dateKey_ = find(["Date", "Call Date", "CallDate", "Start Date", "StartDate"]);
+  // Time column — could be unix seconds OR HH:MM:SS, with or without a separate Date column
+  const timeKey = find(["Time", "Call Time", "Start Time", "CallTime", "StartTime", "Timestamp", "Unix Time", "Unix"]);
+  const durationKey = find(["Duration", "Call Duration", "CallDuration", "Length", "Seconds"]);
+  const infoKey = find(["Info", "Notes", "Note", "Description", "Result", "Status", "Comment"]);
 
   for (let i = 0; i < result.data.length; i++) {
     const r = result.data[i];
     try {
-      const typeRaw = r["Type"] ?? r["type"] ?? "";
-      const name = r["Name"] ?? r["name"] ?? "";
-      const number = r["Number"] ?? r["number"] ?? "";
-      const timeRaw = r["Time"] ?? r["time"] ?? "0";
-      const durationRaw = r["Duration"] ?? r["duration"] ?? "0";
-      const info = r["Info"] ?? r["info"] ?? "";
+      const typeRaw = (typeKey ? r[typeKey] : undefined) ?? "";
+      const name = (nameKey ? r[nameKey] : undefined) ?? "";
+      const number = (numberKey ? r[numberKey] : undefined) ?? "";
+      const durationRaw = (durationKey ? r[durationKey] : undefined) ?? "0";
+      const info = (infoKey ? r[infoKey] : undefined) ?? "";
+      const timeRaw = (timeKey ? r[timeKey] : undefined) ?? "";
+      const dateRaw = (dateKey_ ? r[dateKey_] : undefined) ?? "";
 
-      const ts = unixToDatetime(timeRaw);
-      const status = resolveMicroSIPStatus(info, typeRaw);
-      const durationSeconds = parseDurationToSeconds(durationRaw);
+      // Determine timestamp type:
+      // 1. Unix seconds ≥ 1_000_000_000 (classic MicroSIP CSV)
+      // 2. Human-readable HH:MM:SS + separate Date column
+      // 3. Full datetime string in the Time column (e.g. "2025-04-15 09:30:00")
+      const tsNum = parseInt(timeRaw, 10);
+      const isUnixTs = !isNaN(tsNum) && tsNum >= 1_000_000_000;
+
+      let ts: { date: string; time: string; hour: number; startedAtISO: string; dateKey: string; hourKey: number };
+
+      if (isUnixTs) {
+        // Classic MicroSIP: Time = unix seconds
+        ts = unixToDatetime(timeRaw);
+      } else if (dateRaw) {
+        // Has a separate Date column — parse Date + Time string
+        ts = parseDatetime(dateRaw, timeRaw);
+      } else {
+        // Time column may contain a full datetime string like "2025-04-15 09:30:00"
+        ts = parseDatetime(timeRaw, "");
+        // If that failed, try as a bare date
+        if (!ts.dateKey && timeRaw) {
+          const d = new Date(timeRaw);
+          if (!isNaN(d.getTime()) && d.getFullYear() > 2000) {
+            ts = {
+              date: localDateKey(d), time: localTimeStr(d), hour: d.getHours(),
+              startedAtISO: d.toISOString(), dateKey: localDateKey(d), hourKey: d.getHours(),
+            };
+          }
+        }
+      }
 
       if (!ts.dateKey) {
-        errors.push(`Row ${i + 2}: Could not parse unix timestamp "${timeRaw}"`);
+        skipped++;
+        errors.push(`Row ${i + 2}: Cannot parse timestamp (time="${timeRaw}" date="${dateRaw}") — skipped`);
+        continue;
       }
+
+      const status = resolveMicroSIPStatus(info, typeRaw);
+      const durationSeconds = parseDurationToSeconds(durationRaw);
 
       rows.push({
         callerName: name, phoneNumber: number,
         date: ts.date, time: ts.time,
         durationSeconds, status, notes: info,
         startedAtISO: ts.startedAtISO, dateKey: ts.dateKey, hourKey: ts.hourKey,
-        rawTime: timeRaw,
+        rawTime: isUnixTs ? timeRaw : (dateRaw ? `${dateRaw} ${timeRaw}`.trim() : timeRaw) || undefined,
       });
     } catch (e) {
       errors.push(`Row ${i + 2}: ${String(e)}`);
     }
   }
-  return { rows, errors, format: "microsip-csv" };
+
+  const debug = buildDebug(rows, skipped, keys);
+  return { rows, errors, format: "microsip-csv", debug };
 }
 
-// MicroSIP INI: [Calls]\n0=number;name;type;unix_time;duration_seconds;info
+// ──────────────────────────────────────────────
+// MicroSIP INI
+// ──────────────────────────────────────────────
+
 function parseMicroSIPINI(text: string): ParseResult {
   const rows: ParsedRow[] = [];
   const errors: string[] = [];
   const lines = text.split("\n");
+  let skipped = 0;
 
   for (const line of lines) {
     const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("[") || trimmed.startsWith(";") || trimmed.includes("callsLastKey") || !trimmed.match(/^\d+=./)) continue;
+    if (!trimmed || trimmed.startsWith("[") || trimmed.startsWith(";") ||
+      trimmed.includes("callsLastKey") || !trimmed.match(/^\d+=./)) continue;
 
     try {
       const eqIdx = trimmed.indexOf("=");
@@ -415,7 +597,9 @@ function parseMicroSIPINI(text: string): ParseResult {
       const durationSeconds = parseDurationToSeconds(durationRaw);
 
       if (!ts.dateKey) {
-        errors.push(`INI line: Could not parse unix timestamp "${unixTime}"`);
+        skipped++;
+        errors.push(`INI line: Cannot parse unix timestamp "${unixTime}" — skipped`);
+        continue;
       }
 
       rows.push({
@@ -429,13 +613,19 @@ function parseMicroSIPINI(text: string): ParseResult {
       errors.push(`INI line "${trimmed.slice(0, 40)}": ${String(e)}`);
     }
   }
-  return { rows, errors, format: "microsip-ini" };
+
+  const debug = buildDebug(rows, skipped, []);
+  return { rows, errors, format: "microsip-ini", debug };
 }
 
-// MicroSIP XML: <call type="" name="" number="" time="" duration="" info="" />
+// ──────────────────────────────────────────────
+// MicroSIP XML
+// ──────────────────────────────────────────────
+
 function parseMicroSIPXML(text: string): ParseResult {
   const rows: ParsedRow[] = [];
   const errors: string[] = [];
+  let skipped = 0;
 
   try {
     const parser = new DOMParser();
@@ -461,7 +651,9 @@ function parseMicroSIPXML(text: string): ParseResult {
         const durationSeconds = parseDurationToSeconds(durationRaw);
 
         if (!ts.dateKey) {
-          errors.push(`XML call ${i}: Could not parse unix timestamp "${unixTime}"`);
+          skipped++;
+          errors.push(`XML call ${i}: Cannot parse timestamp "${unixTime}" — skipped`);
+          continue;
         }
 
         rows.push({
@@ -479,39 +671,48 @@ function parseMicroSIPXML(text: string): ParseResult {
     return { rows: [], errors: ["XML import failed. Try CSV export instead."], format: "microsip-xml" };
   }
 
-  return { rows, errors, format: "microsip-xml" };
+  const debug = buildDebug(rows, skipped, []);
+  return { rows, errors, format: "microsip-xml", debug };
 }
 
+// ──────────────────────────────────────────────
 // Callcentric CSV — flexible column detection
+// ──────────────────────────────────────────────
+
 function parseCallcentricCSV(text: string): ParseResult {
   const result = Papa.parse<Record<string, string>>(text.trim(), { header: true, skipEmptyLines: true });
   const rows: ParsedRow[] = [];
   const errors: string[] = [];
   const keys = result.meta.fields ?? [];
+  const find = makeFinder(keys);
+  let skipped = 0;
 
-  const findKey = (candidates: string[]): string | undefined =>
-    keys.find((k) => candidates.some((c) => k.toLowerCase().includes(c.toLowerCase())));
-
-  const nameKey = findKey(["Name", "CallerName", "Caller", "CallerID", "Caller ID"]);
-  const numberKey = findKey(["Number", "Phone", "From", "To", "DID", "Extension"]);
-  const dateKey_ = findKey(["Date"]);
-  const timeKey = findKey(["Time"]);
-  const durationKey = findKey(["Duration", "Length", "Seconds"]);
-  const statusKey = findKey(["Status", "Result", "Direction", "Type", "Info"]);
-  const notesKey = findKey(["Notes", "Note", "Comment", "Info", "Description"]);
+  const nameKey = find(["Name", "CallerName", "Caller", "CallerID", "Caller ID"]);
+  const numberKey = find(["Number", "Phone", "From", "To", "DID", "Extension"]);
+  const dateKey_ = find(["Date", "Call Date"]);
+  const timeKey = find(["Time", "Start Time", "Call Time"]);
+  const durationKey = find(["Duration", "Length", "Seconds"]);
+  const statusKey = find(["Status", "Result", "Direction", "Type", "Info"]);
+  const notesKey = find(["Notes", "Note", "Comment", "Info", "Description"]);
 
   for (let i = 0; i < result.data.length; i++) {
     const r = result.data[i];
     try {
-      const name = nameKey ? (r[nameKey] ?? "") : "";
-      const number = numberKey ? (r[numberKey] ?? "") : "";
-      const dateRaw = dateKey_ ? (r[dateKey_] ?? "") : "";
-      const timeRaw = timeKey ? (r[timeKey] ?? "") : "";
-      const durationRaw = durationKey ? (r[durationKey] ?? "0") : "0";
-      const status = normalizeStatus(statusKey ? (r[statusKey] ?? "Other") : "Other");
-      const notes = notesKey ? (r[notesKey] ?? "") : "";
+      const name = (nameKey ? r[nameKey] : undefined) ?? "";
+      const number = (numberKey ? r[numberKey] : undefined) ?? "";
+      const dateRaw = (dateKey_ ? r[dateKey_] : undefined) ?? "";
+      const timeRaw = (timeKey ? r[timeKey] : undefined) ?? "";
+      const durationRaw = (durationKey ? r[durationKey] : undefined) ?? "0";
+      const status = normalizeStatus((statusKey ? r[statusKey] : undefined) ?? "Other");
+      const notes = (notesKey ? r[notesKey] : undefined) ?? "";
 
       const ts = parseDatetime(dateRaw, timeRaw);
+
+      if (!ts.dateKey) {
+        skipped++;
+        errors.push(`Row ${i + 2}: Invalid timestamp (date="${dateRaw}" time="${timeRaw}") — skipped`);
+        continue;
+      }
 
       rows.push({
         callerName: name, phoneNumber: number,
@@ -530,5 +731,6 @@ function parseCallcentricCSV(text: string): ParseResult {
     errors.push("Import failed: could not detect call-log format. Expected columns: Name, Number, Date, Time, Duration, Status, Notes");
   }
 
-  return { rows, errors, format: "callcentric-csv" };
+  const debug = buildDebug(rows, skipped, keys);
+  return { rows, errors, format: "callcentric-csv", debug };
 }

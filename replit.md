@@ -49,8 +49,15 @@ See the `pnpm-workspace` skill for workspace structure, TypeScript setup, and pa
 **Key files**:
 - `src/lib/types.ts` — CallStatus, CallSource, StoredCall, ImportResult
 - `src/lib/parsers.ts` — all format parsers + dedup key generation
-- `src/lib/storage.ts` — localStorage CRUD + merge import
+- `src/lib/callDate.ts` — `getCallDate`, `getHourKey`, `getDateKey`, `repairTimestamps` — all guarded by `isPlausible()` (year >= 2001)
+- `src/lib/storage.ts` — localStorage CRUD + merge import; `DATA_SCHEMA_VERSION=3` with purge of unresolvable timestamps
 - `src/lib/report.ts` — daily summary TXT and master CSV generation
 - `src/lib/utils.ts` — maskPhone, formatDuration, cn
 - `src/data/sampleData.ts` — sample StoredCall[]
 - `src/pages/Dashboard.tsx` — main single-page dashboard
+
+**Timestamp fix (v3 schema)**:
+- Root cause was `new Date("0")` = year 2000 epoch which falsely placed all calls at "12AM" in charts
+- Fix 1 (`callDate.ts`): `isPlausible(d)` guard requires year >= 2001 everywhere; `tryUnixOrString` rejects bare integer strings and small numbers
+- Fix 2 (`parsers.ts`): unix timestamp threshold raised to `>= 1_000_000_000`; rows with invalid timestamps are skipped (not silently epoch-stamped)
+- Fix 3 (`storage.ts`): Schema v3 repair now purges stored calls where `getCallDate(c) === null` (broken pre-fix artifacts)

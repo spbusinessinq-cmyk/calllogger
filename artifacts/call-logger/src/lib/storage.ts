@@ -1,6 +1,6 @@
 import { type StoredCall, type ImportResult } from "./types";
 import { normalizeStoredStatus, unixToDatetime } from "./parsers";
-import { repairTimestamps } from "./callDate";
+import { getCallDate, repairTimestamps } from "./callDate";
 
 const CALLS_KEY = "ps_call_logger_calls";
 const LAST_IMPORT_KEY = "ps_call_logger_last_import";
@@ -8,7 +8,8 @@ const LAST_MIGRATION_KEY = "ps_call_logger_last_migration";
 const SCHEMA_VERSION_KEY = "ps_call_logger_schema_version";
 
 // Bump this when the stored shape changes in a way that requires migration.
-export const DATA_SCHEMA_VERSION = 2;
+// v3: purge calls with no resolvable timestamp (epoch/pre-2001 artifacts from old parser).
+export const DATA_SCHEMA_VERSION = 3;
 
 // ──────────────────────────────────────────────
 // Schema version
@@ -73,6 +74,7 @@ export function loadLastMigrationTime(): string | null {
 export interface SchemaRepairResult {
   timestampRepaired: number;
   statusFixed: number;
+  purgedCount: number;
   total: number;
   schemaVersion: number;
   ranAt: string;
@@ -93,9 +95,16 @@ export function runSchemaRepair(): SchemaRepairResult {
   // Step 1 — timestamp repair via getCallDate (handles all raw field names)
   const { calls: tsRepaired, repairedCount: timestampRepaired } = repairTimestamps(raw);
 
-  // Step 2 — status normalization from notes
+  // Step 2 (v3) — purge calls with no resolvable timestamp.
+  // These are broken artifacts from old parsers that produced epoch/pre-2001 dates.
+  // Calls with a valid plausible date are kept.
+  const beforePurge = tsRepaired.length;
+  const afterPurge = tsRepaired.filter((c) => getCallDate(c) !== null);
+  const purgedCount = beforePurge - afterPurge.length;
+
+  // Step 3 — status normalization from notes
   let statusFixed = 0;
-  const fullyRepaired = tsRepaired.map((c) => {
+  const fullyRepaired = afterPurge.map((c) => {
     const correctedStatus = normalizeStoredStatus(c.status, c.notes);
     if (correctedStatus !== c.status) {
       statusFixed++;
@@ -114,6 +123,7 @@ export function runSchemaRepair(): SchemaRepairResult {
   return {
     timestampRepaired,
     statusFixed,
+    purgedCount,
     total: fullyRepaired.length,
     schemaVersion: DATA_SCHEMA_VERSION,
     ranAt,

@@ -12,7 +12,7 @@ import {
   type MigrateResult, type SchemaRepairResult,
 } from "@/lib/storage";
 import { getCallDate, getDateKey, getHourKey } from "@/lib/callDate";
-import { parseText, toStoredCall, FORMAT_LABELS, type DetectedFormat } from "@/lib/parsers";
+import { parseText, toStoredCall, FORMAT_LABELS, type DetectedFormat, type ImportDebug } from "@/lib/parsers";
 import { generateMasterCSV } from "@/lib/report";
 import { formatDuration, formatTimestamp } from "@/lib/utils";
 import { SAMPLE_DATA } from "@/data/sampleData";
@@ -162,6 +162,7 @@ export default function Dashboard() {
   const [parseErrors, setParseErrors] = useState<string[]>([]);
   const [importMsg, setImportMsg] = useState<{ text: string; type: "ok" | "warn" | "err" } | null>(null);
   const [statusDebug, setStatusDebug] = useState<Record<string, number> | null>(null);
+  const [importDebug, setImportDebug] = useState<ImportDebug | null>(null);
   const [isDragOver, setIsDragOver] = useState(false);
   const [showErrors, setShowErrors] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -395,10 +396,11 @@ export default function Dashboard() {
   const doParseAndPreview = useCallback((text: string) => {
     const trimmed = text.trim();
     if (!trimmed) { setImportMsg({ text: "No content to parse.", type: "err" }); return; }
-    const { rows, errors, format } = parseText(trimmed);
+    const { rows, errors, format, debug } = parseText(trimmed);
     setDetectedFormat(format);
     setParseErrors(errors);
     setShowErrors(false);
+    setImportDebug(debug ?? null);
     if (rows.length === 0) {
       setImportMsg({ text: errors[0] ?? "Import failed: no rows detected.", type: "err" });
       setPreviewRows(null); setAllParsed(null); setStatusDebug(null); return;
@@ -409,9 +411,10 @@ export default function Dashboard() {
     const counts: Record<string, number> = {};
     stored.forEach((c) => { counts[c.status] = (counts[c.status] ?? 0) + 1; });
     setStatusDebug(counts);
-    const tsErrors = rows.filter((r) => r.parseError || !r.dateKey).length;
+    const tsErrors = debug?.invalidTimestampCount ?? rows.filter((r) => r.parseError || !r.dateKey).length;
+    const skipNote = (debug?.skippedCount ?? 0) > 0 ? ` · ${debug!.skippedCount} row${debug!.skippedCount !== 1 ? "s" : ""} skipped (invalid timestamp)` : "";
     const tsNote = tsErrors > 0 ? ` · ${tsErrors} timestamp warning${tsErrors !== 1 ? "s" : ""}` : "";
-    setImportMsg({ text: `Auto-detected: ${FORMAT_LABELS[format]}. ${rows.length} row${rows.length !== 1 ? "s" : ""} ready — review preview below.${tsNote}`, type: tsErrors > 0 ? "warn" : "ok" });
+    setImportMsg({ text: `Auto-detected: ${FORMAT_LABELS[format]}. ${rows.length} row${rows.length !== 1 ? "s" : ""} ready — review preview below.${tsNote}${skipNote}`, type: (tsErrors > 0 || (debug?.skippedCount ?? 0) > 0) ? "warn" : "ok" });
   }, []);
 
   const handleFileRead = useCallback((file: File) => {
@@ -480,7 +483,7 @@ export default function Dashboard() {
 
   const handleClearImport = useCallback(() => {
     setImportText(""); setPreviewRows(null); setAllParsed(null);
-    setImportMsg(null); setStatusDebug(null); setDetectedFormat(""); setParseErrors([]); setShowPaste(false);
+    setImportMsg(null); setStatusDebug(null); setImportDebug(null); setDetectedFormat(""); setParseErrors([]); setShowPaste(false);
   }, []);
 
   // ── Manual add
@@ -626,6 +629,60 @@ export default function Dashboard() {
                     <span className="text-[9px] text-red-500 self-center">↑ Other is high — check Info field values</span>
                   )}
                 </div>
+              </div>
+            )}
+
+            {/* Import debug summary */}
+            {importDebug && importDebug.importedCount > 0 && (
+              <div className="mt-2 border border-zinc-800 bg-zinc-950/60 px-3 py-2 space-y-1">
+                <p className="text-[9px] uppercase tracking-widest text-zinc-600 mb-1.5">Import Summary</p>
+                <div className="flex flex-wrap gap-x-5 gap-y-1">
+                  <span className="text-[10px] font-mono">
+                    <span className="text-zinc-600">Parsed: </span>
+                    <span className="text-green-500 font-bold">{importDebug.importedCount}</span>
+                  </span>
+                  {importDebug.skippedCount > 0 && (
+                    <span className="text-[10px] font-mono">
+                      <span className="text-zinc-600">Skipped: </span>
+                      <span className="text-amber-500 font-bold">{importDebug.skippedCount}</span>
+                      <span className="text-zinc-700 ml-1">(invalid timestamp)</span>
+                    </span>
+                  )}
+                  {importDebug.invalidTimestampCount > 0 && (
+                    <span className="text-[10px] font-mono">
+                      <span className="text-zinc-600">No timestamp: </span>
+                      <span className="text-red-400 font-bold">{importDebug.invalidTimestampCount}</span>
+                    </span>
+                  )}
+                  {importDebug.earliestCall && (
+                    <span className="text-[10px] font-mono">
+                      <span className="text-zinc-600">Earliest: </span>
+                      <span className="text-zinc-400">{new Date(importDebug.earliestCall).toLocaleString()}</span>
+                    </span>
+                  )}
+                  {importDebug.latestCall && (
+                    <span className="text-[10px] font-mono">
+                      <span className="text-zinc-600">Latest: </span>
+                      <span className="text-zinc-400">{new Date(importDebug.latestCall).toLocaleString()}</span>
+                    </span>
+                  )}
+                </div>
+                {importDebug.busiestHours.length > 0 && (
+                  <div className="flex items-center gap-2 mt-1">
+                    <span className="text-[9px] text-zinc-600 uppercase tracking-widest">Top hours:</span>
+                    {importDebug.busiestHours.map((h, i) => (
+                      <span key={i} className="text-[10px] font-mono">
+                        <span className="text-amber-500">{h.label}</span>
+                        <span className="text-zinc-600 ml-1">({h.count})</span>
+                      </span>
+                    ))}
+                  </div>
+                )}
+                {importDebug.detectedColumns.length > 0 && (
+                  <p className="text-[9px] font-mono text-zinc-700 mt-1">
+                    Columns detected: {importDebug.detectedColumns.join(", ")}
+                  </p>
+                )}
               </div>
             )}
 
@@ -839,7 +896,7 @@ export default function Dashboard() {
                   )}
                   {schemaRepairResult && !repairMsg && (
                     <span className="text-[9px] font-mono text-zinc-700">
-                      Last repair: ts={schemaRepairResult.timestampRepaired} status={schemaRepairResult.statusFixed} total={schemaRepairResult.total}
+                      Last repair: ts={schemaRepairResult.timestampRepaired} purged={schemaRepairResult.purgedCount} status={schemaRepairResult.statusFixed} total={schemaRepairResult.total}
                     </span>
                   )}
                 </div>
