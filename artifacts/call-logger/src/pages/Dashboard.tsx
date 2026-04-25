@@ -9,6 +9,7 @@ import {
   mergeImport, migrateAll, loadLastMigrationTime,
   type MigrateResult,
 } from "@/lib/storage";
+import { getCallDate, getDateKey, getHourKey, repairTimestamps } from "@/lib/callDate";
 import { parseText, toStoredCall, FORMAT_LABELS, type DetectedFormat } from "@/lib/parsers";
 import { generateMasterCSV } from "@/lib/report";
 import { formatDuration, formatTimestamp } from "@/lib/utils";
@@ -112,10 +113,35 @@ export default function Dashboard() {
 
   useEffect(() => { saveCalls(calls); }, [calls]);
 
-  // Auto-migrate on first load: fix statuses + backfill timestamp fields
+  // Guard: run timestamp repair exactly once per session
+  const repairDone = useRef(false);
+
+  // Startup: repair timestamps then run status migration
   useEffect(() => {
+    if (repairDone.current) return;
+    repairDone.current = true;
+
+    // 1. Re-derive startedAtISO/dateKey/hourKey for every stored call using getCallDate
+    const raw = loadCalls();
+    const repaired = repairTimestamps(raw);
+    const anyRepaired = repaired.some((c, i) =>
+      c.startedAtISO !== raw[i].startedAtISO ||
+      c.dateKey !== raw[i].dateKey ||
+      c.hourKey !== raw[i].hourKey
+    );
+    if (anyRepaired) saveCalls(repaired);
+
+    // 2. Re-normalize statuses / backfill via storage migration
     const result = migrateAll();
-    if (result.fixed > 0 || result.timestampFixed > 0) setCalls(loadCalls());
+    if (anyRepaired || result.fixed > 0 || result.timestampFixed > 0) {
+      setCalls(loadCalls());
+    }
+
+    // Debug log for one sample call
+    const sample = loadCalls()[0];
+    if (sample) {
+      console.log("sample call for chart parsing", sample, getCallDate(sample), getDateKey(sample), getHourKey(sample));
+    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -173,20 +199,35 @@ export default function Dashboard() {
     const withDur = calls.filter((c) => c.durationSeconds > 0);
     const avgSec = withDur.length ? Math.round(withDur.reduce((a, c) => a + c.durationSeconds, 0) / withDur.length) : 0;
     const longest = calls.reduce<StoredCall | null>((a, b) => (!a || b.durationSeconds > a.durationSeconds ? b : a), null);
+    // Peak hour — use canonical getHourKey which falls back through all raw fields
     const hourCounts: Record<number, number> = {};
-    calls.forEach((c) => { const h = c.hourKey ?? c.hour; hourCounts[h] = (hourCounts[h] ?? 0) + 1; });
+    calls.forEach((c) => {
+      const h = getHourKey(c);
+      if (h !== null) hourCounts[h] = (hourCounts[h] ?? 0) + 1;
+    });
     const peakEntry = Object.entries(hourCounts).sort(([, a], [, b]) => b - a)[0];
     const peakHour = peakEntry ? hourLabel(Number(peakEntry[0])) : "—";
     return { total, answered, missed, voicemail, outgoing, repeatCallers, avgSec, longest, peakHour, nameCounts };
   }, [calls]);
 
-  // Calls by hour — use hourKey, show active range, 12AM-11PM labels
+  // Timestamp quality stats — used for debug display and Data Quality panel
+  const tsQuality = useMemo(() => {
+    let valid = 0;
+    let unknown = 0;
+    calls.forEach((c) => {
+      if (getCallDate(c) !== null) valid++;
+      else unknown++;
+    });
+    return { valid, unknown, total: calls.length };
+  }, [calls]);
+
+  // Calls by hour — use getHourKey which reads rawTime/startedAtISO/unix fallback
   const callsByHour = useMemo(() => {
     const map: Record<number, number> = {};
     for (let h = 0; h < 24; h++) map[h] = 0;
     calls.forEach((c) => {
-      const h = c.hourKey ?? c.hour ?? 0;
-      map[h] = (map[h] ?? 0) + 1;
+      const h = getHourKey(c);
+      if (h !== null) map[h] = (map[h] ?? 0) + 1;
     });
 
     const allHours = Array.from({ length: 24 }, (_, h) => ({ h, count: map[h] }));
@@ -206,14 +247,14 @@ export default function Dashboard() {
     }));
   }, [calls]);
 
-  const hasHourData = useMemo(() => calls.some((c) => (c.dateKey || c.date)), [calls]);
+  const hasHourData = useMemo(() => calls.some((c) => getHourKey(c) !== null), [calls]);
 
-  // Calls by day — use dateKey, last 14 days
+  // Calls by day — use getDateKey which handles all raw field fallbacks
   const callsByDay = useMemo(() => {
     const map: Record<string, number> = {};
     calls.forEach((c) => {
-      const key = (c.dateKey || c.date || "").slice(0, 10);
-      if (key && /^\d{4}-\d{2}-\d{2}$/.test(key)) map[key] = (map[key] ?? 0) + 1;
+      const key = getDateKey(c);
+      if (key && key !== "unknown") map[key] = (map[key] ?? 0) + 1;
     });
     const entries = Object.entries(map).sort(([a], [b]) => a.localeCompare(b)).slice(-14);
     return entries.map(([date, count]) => {
@@ -226,7 +267,7 @@ export default function Dashboard() {
     });
   }, [calls]);
 
-  const hasDayData = useMemo(() => calls.some((c) => c.dateKey || c.date), [calls]);
+  const hasDayData = useMemo(() => calls.some((c) => getDateKey(c) !== "unknown"), [calls]);
 
   const callsByStatus = useMemo(() => {
     const map: Record<string, number> = {};
@@ -263,8 +304,8 @@ export default function Dashboard() {
     const map: Record<string, number> = {};
     calls.filter((c) => c.status === "Missed" || c.status === "Canceled" || c.status === "Voicemail")
       .forEach((c) => {
-        const key = (c.dateKey || c.date || "").slice(0, 10);
-        if (key && /^\d{4}-\d{2}-\d{2}$/.test(key)) map[key] = (map[key] ?? 0) + 1;
+        const key = getDateKey(c);
+        if (key && key !== "unknown") map[key] = (map[key] ?? 0) + 1;
       });
     return Object.entries(map).sort(([a], [b]) => a.localeCompare(b)).slice(-7).map(([date, count]) => {
       try {
@@ -299,15 +340,15 @@ export default function Dashboard() {
   // Data quality stats
   const dataQuality = useMemo(() => {
     const total = calls.length;
-    const withTimestamp = calls.filter((c) => c.startedAtISO && c.startedAtISO !== "").length;
-    const withDateKey = calls.filter((c) => c.dateKey && c.dateKey !== "").length;
+    // Use canonical getCallDate so we count resolved timestamps, not just stored ISO strings
+    const withTimestamp = calls.filter((c) => getCallDate(c) !== null).length;
     const missingTimestamp = total - withTimestamp;
     const otherCount = calls.filter((c) => c.status === "Other").length;
     const lastMigration = loadLastMigrationTime();
     const seenKeys = new Set<string>();
     let duplicateKeys = 0;
     calls.forEach((c) => { if (seenKeys.has(c.dedupeKey)) { duplicateKeys++; } else { seenKeys.add(c.dedupeKey); } });
-    return { total, withTimestamp, withDateKey, missingTimestamp, otherCount, duplicateKeys, lastMigration };
+    return { total, withTimestamp, missingTimestamp, otherCount, duplicateKeys, lastMigration };
   }, [calls]);
 
   const filtered = useMemo(() => {
@@ -726,6 +767,16 @@ export default function Dashboard() {
                 </div>
               </div>
             </Sec>
+
+            {/* Timestamp quality debug line */}
+            <div className="flex items-center gap-4 px-1 py-1 border border-zinc-800/60 bg-zinc-900/30">
+              <span className="text-[9px] font-mono text-zinc-600 uppercase tracking-widest">
+                Timestamp valid: <span className={tsQuality.valid === tsQuality.total ? "text-green-600" : "text-amber-500"}>{tsQuality.valid}</span>
+                {" / Total: "}<span className="text-zinc-500">{tsQuality.total}</span>
+                {tsQuality.unknown > 0 && <span className="text-amber-500 ml-3">Unknown: {tsQuality.unknown}</span>}
+                {tsQuality.valid === tsQuality.total && tsQuality.total > 0 && <span className="text-green-700 ml-3">✓ all timestamps resolvable</span>}
+              </span>
+            </div>
 
             <Sec title="Status & Callers">
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">

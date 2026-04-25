@@ -1,0 +1,92 @@
+Fix the empty Calls by Hour and Calls by Day charts.
+
+Do not redesign the app. Do not change import UI. Do not change deployment. Only fix chart data generation.
+
+Current bug:
+Metrics show 59 calls imported, but Calls by Hour and Calls by Day charts are empty / all zero. That means imported calls exist, but the chart grouping logic is not deriving usable hour/day values.
+
+Required fix:
+
+1. Create one canonical function:
+
+function getCallDate(call): Date | null
+
+It must try these fields in order:
+- call.startedAtISO
+- call.startedAt
+- call.timestamp
+- call.timeUnix
+- call.rawTime if numeric Unix seconds
+- call.time if numeric Unix seconds
+- call.date + " " + call.time when date is not numeric
+- call.dateKey + " " + call.time
+
+Important MicroSIP rule:
+MicroSIP CSV field "Time" is Unix timestamp in SECONDS.
+If a time value is numeric and greater than 1000000000, parse it as:
+new Date(Number(value) * 1000)
+
+Do not treat MicroSIP Unix seconds like a clock string.
+
+2. Create canonical helpers:
+
+function getDateKey(call) {
+  const d = getCallDate(call)
+  return d ? local YYYY-MM-DD : "unknown"
+}
+
+function getHourKey(call) {
+  const d = getCallDate(call)
+  return d ? d.getHours() : null
+}
+
+3. Use these helpers in:
+- Calls by Hour chart
+- Calls by Day chart
+- Peak Hour metric
+- One-page report mini charts
+
+Do not rely only on stored call.dateKey/hourKey because older records may not have those fields.
+
+4. During import, still store:
+startedAtISO
+dateKey
+hourKey
+
+But charts must be resilient and calculate from raw fields if stored keys are missing.
+
+5. Add a temporary Data Quality debug line under the charts:
+Timestamp valid: X / Total: Y
+Unknown timestamp: Z
+
+6. Add console logging for one imported call sample:
+console.log("sample call for chart parsing", calls[0], getCallDate(calls[0]), getDateKey(calls[0]), getHourKey(calls[0]))
+
+7. Fix the chart data arrays:
+
+Calls by hour:
+- Create 24 buckets from 0 to 23.
+- For each call with valid hour, increment the matching bucket.
+- Render all 24 or a compact range, but nonzero buckets must show bars.
+
+Calls by day:
+- Group by dateKey.
+- Sort ascending.
+- Render every date with count > 0.
+- If there are valid timestamps, this chart must not be blank.
+
+8. Add a repair migration:
+On startup, for every stored call:
+- const d = getCallDate(call)
+- if d exists, update startedAtISO/dateKey/hourKey
+- save back to localStorage once
+This migration must run once only, guarded by useRef or equivalent.
+
+9. Acceptance test:
+After importing MicroSIP CSV:
+- Metrics show 59 calls
+- Timestamp valid should be close to 59 / 59
+- Calls by Hour shows nonzero bars
+- Calls by Day shows at least one nonzero day
+- Peak Hour is based on actual hour bucket
+- npm run build passes
